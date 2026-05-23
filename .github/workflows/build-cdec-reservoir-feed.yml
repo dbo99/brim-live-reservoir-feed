@@ -3,7 +3,7 @@ name: Build CDEC reservoir feed
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 */12 * * *"
+    - cron: "17 */6 * * *"
 
 permissions:
   contents: write
