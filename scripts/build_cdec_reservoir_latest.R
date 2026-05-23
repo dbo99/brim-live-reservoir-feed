@@ -78,6 +78,15 @@ cdec_getall_url <- Sys.getenv(
   unset = "https://cdec.water.ca.gov/dynamicapp/getAll?sens_num=15"
 )
 
+cdec_res_daily_url <- Sys.getenv(
+  "CDEC_RES_DAILY_URL",
+  ## Daily reservoir summary ending at midnight.  This is not a replacement for
+  ## the latest sensor-15 table, but it adds useful hydrologic context such as
+  ## midnight storage, daily storage change, percent capacity, average storage,
+  ## inflow/outflow, and prior-year storage where CDEC reports them.
+  unset = "https://cdec.water.ca.gov/reportapp/javareports?name=RES"
+)
+
 cnrfc_inflow_list_url <- Sys.getenv(
   "CNRFC_RSVR_INFLOW_LIST_URL",
   unset = "https://www.cnrfc.noaa.gov/?product=rsvrInflow"
@@ -86,6 +95,15 @@ cnrfc_inflow_list_url <- Sys.getenv(
 cnrfc_release_list_url <- Sys.getenv(
   "CNRFC_RSVR_RELEASE_LIST_URL",
   unset = "https://www.cnrfc.noaa.gov/?product=rsvrRelease"
+)
+
+cnrfc_ensemble_list_url <- Sys.getenv(
+  "CNRFC_ENSEMBLE_LIST_URL",
+  ## The ensemble product page carries the mixed river/reservoir ensemble-point
+  ## selector/list.  ANTC1 is used only as a stable example reservoir point for
+  ## opening the product page; all detected IDs are intersected with the BRIM
+  ## CDEC-CNRFC crosswalk before links are written.
+  unset = "https://www.cnrfc.noaa.gov/ensembleProduct.php?id=ANTC1&prodID=3"
 )
 
 usace_ca_plots_url <- Sys.getenv(
@@ -118,6 +136,26 @@ pt_num <- function(x) {
   suppressWarnings(as.numeric(x))
 }
 
+pt_force_utf8 <- function(x) {
+  ## Some CNRFC product pages include bytes that are not valid UTF-8.  Those
+  ## bytes can trigger errors such as "invalid multibyte string" when stringr,
+  ## toupper(), or grepl() parse the product lists.  For BRIM's purposes here,
+  ## the critical content is ASCII station IDs such as ANTC1, SHDC1, and NIMC1.
+  ## Convert to safe UTF-8 and preserve any odd bytes as printable placeholders
+  ## rather than letting one bad character break the scheduled feed build.
+  x <- as.character(x)
+
+  y <- iconv(x, from = "UTF-8", to = "UTF-8", sub = "byte")
+
+  bad <- is.na(y)
+  if (any(bad)) {
+    y[bad] <- iconv(x[bad], from = "latin1", to = "UTF-8", sub = "byte")
+  }
+
+  y[is.na(y)] <- ""
+  y
+}
+
 pt_fetch_text <- function(url, label = url, timeout_sec = 30, retries = 3) {
   message("Fetching ", label, ": ", url)
 
@@ -146,7 +184,7 @@ pt_fetch_text <- function(url, label = url, timeout_sec = 30, retries = 3) {
         )
       )
       raw <- curl::curl_fetch_memory(url, handle = h)$content
-      rawToChar(raw)
+      pt_force_utf8(rawToChar(raw))
     }, error = function(e) {
       last_error <<- conditionMessage(e)
       NULL
@@ -164,31 +202,55 @@ pt_fetch_text <- function(url, label = url, timeout_sec = 30, retries = 3) {
 
 pt_extract_cnrfc_product_ids <- function(html, known_ids = character()) {
   ## The CNRFC reservoir-inflow/release product pages can render IDs in links,
-  ## option values, JavaScript, or visible text.  Extract broadly, then intersect
-  ## with known BRIM CNRFC/NWS IDs so unrelated page text cannot create popup
-  ## links.
+  ## option values, JavaScript, visible text, or embedded page data.  The safest
+  ## strategy for BRIM is:
+  ##   1. Search for exact known BRIM CNRFC/NWS IDs anywhere in the page text.
+  ##   2. Also run broad regex extraction for ordinary id=<NWSID> patterns.
+  ##   3. Intersect everything back to known_ids so unrelated NOAA/CNRFC text
+  ##      cannot create reservoir popup links.
+  ##
+  ## This keeps popups selective: inflow/release links appear only for IDs that
+  ## are currently present on the corresponding CNRFC product-list page.
   known_ids <- toupper(pt_chr(known_ids))
-  known_ids <- known_ids[!is.na(known_ids) & known_ids != ""]
+  known_ids <- sort(unique(known_ids[!is.na(known_ids) & known_ids != ""]))
 
   if (length(known_ids) == 0 || is.null(html) || !nzchar(html)) {
     return(character())
   }
 
+  html <- pt_force_utf8(html)
   txt <- toupper(html)
+  txt <- gsub("&AMP;", "&", txt, fixed = TRUE)
+  txt <- gsub("&#39;|&APOS;", "'", txt, ignore.case = TRUE)
+  txt <- gsub("&QUOT;", "\"", txt, fixed = TRUE)
 
+  ## Exact known-ID scan.  This is intentionally simple and robust to CNRFC
+  ## changing whether IDs appear in links, JavaScript arrays, dropdown labels,
+  ## or visible text.
+  ids0 <- known_ids[
+    vapply(
+      known_ids,
+      function(id) grepl(id, txt, fixed = TRUE),
+      logical(1)
+    )
+  ]
+
+  ## URL/form-style patterns: id=ANTC1, ?id=ANTC1, value="ANTC1", etc.
   id_from_params <- stringr::str_match_all(
     txt,
-    "(?:[?&]ID=|\\bID=|VALUE=['\\\"]?)([A-Z0-9]{3,6})"
+    "(?:[?&]ID=|\\bID\\s*[=:]\\s*['\\\"]?|VALUE\\s*=\\s*['\\\"]?)([A-Z0-9]{3,8})"
   )[[1]]
-
   ids1 <- if (nrow(id_from_params) > 0) id_from_params[, 2] else character()
 
+  ## General CNRFC/NWS-like IDs.  Most California CNRFC IDs are five characters
+  ## such as ANTC1, SHDC1, FOLC1, NIMC1, but keep the expression broad enough
+  ## for similar products.
   ids2 <- stringr::str_extract_all(
     txt,
     "\\b[A-Z0-9]{3,6}[A-Z][0-9]\\b"
   )[[1]]
 
-  ids <- sort(unique(c(ids1, ids2)))
+  ids <- sort(unique(c(ids0, ids1, ids2)))
   ids <- ids[!is.na(ids) & ids != ""]
   intersect(ids, known_ids)
 }
@@ -427,6 +489,105 @@ pt_parse_getall_storage <- function(html) {
     dplyr::distinct(.data$cdec_id, .keep_all = TRUE)
 }
 
+pt_empty_latest_storage_tbl <- function() {
+  tibble::tibble(
+    cdec_station_name_latest = character(),
+    cdec_id = character(),
+    elevation_ft_latest = numeric(),
+    obs_datetime_cdec_display = character(),
+    storage_af = numeric(),
+    cdec_basin_latest_table = character()
+  )
+}
+
+pt_empty_res_daily_tbl <- function() {
+  tibble::tibble(
+    cdec_id = character(),
+    midnight_station_name = character(),
+    capacity_af_res = numeric(),
+    midnight_elevation_ft = numeric(),
+    midnight_storage_af = numeric(),
+    midnight_storage_change_af = numeric(),
+    midnight_pct_capacity = numeric(),
+    midnight_avg_storage_af = numeric(),
+    midnight_pct_average = numeric(),
+    midnight_outflow_cfs = numeric(),
+    midnight_inflow_cfs = numeric(),
+    midnight_storage_year_ago_af = numeric(),
+    midnight_basin_res_table = character(),
+    midnight_report_source_url = character(),
+    midnight_data_status = character()
+  )
+}
+
+pt_parse_res_daily_report <- function(html, source_url = cdec_res_daily_url) {
+  ## Parse the CDEC RES daily reservoir report.  The report is a daily summary
+  ## ending at midnight, not a near-real-time observation table.  It is useful
+  ## in BRIM as a stable hydrologic reference beside the latest sensor-15 value.
+  ##
+  ## Expected data-row cells:
+  ##   Reservoir Name | StaID | Capacity | Elevation | Storage | Storage Change
+  ##   | % Capacity | Average Storage | % Average | Outflow | Inflow
+  ##   | Storage-Year Ago This Date
+  out <- list()
+  current_basin <- NA_character_
+
+  cell_rows <- pt_extract_html_rows(html)
+
+  for (cells in cell_rows) {
+    cells <- cells[nzchar(cells)]
+
+    if (length(cells) == 1 && pt_is_basin_header(cells[1])) {
+      current_basin <- stringr::str_to_title(cells[1])
+      next
+    }
+
+    ## Allow extra cells in case CDEC inserts links/notes, but require the first
+    ## 12 core cells used by the standard RES table.
+    if (length(cells) >= 12) {
+      cdec_id <- toupper(stringr::str_squish(cells[2]))
+
+      is_station_row <- grepl("^[A-Z0-9]{2,5}$", cdec_id) &&
+        !grepl("STAID|RESERVOIR", cdec_id, ignore.case = TRUE)
+
+      if (is_station_row) {
+        midnight_storage_af <- pt_num(cells[5])
+        status <- dplyr::case_when(
+          !is.na(midnight_storage_af) ~ "CDEC RES daily midnight storage available.",
+          TRUE ~ "CDEC RES daily report row present, but midnight storage is not reported."
+        )
+
+        out[[length(out) + 1]] <- tibble::tibble(
+          cdec_id = cdec_id,
+          midnight_station_name = stringr::str_squish(cells[1]),
+          capacity_af_res = pt_num(cells[3]),
+          midnight_elevation_ft = pt_num(cells[4]),
+          midnight_storage_af = midnight_storage_af,
+          midnight_storage_change_af = pt_num(cells[6]),
+          midnight_pct_capacity = pt_num(cells[7]),
+          midnight_avg_storage_af = pt_num(cells[8]),
+          midnight_pct_average = pt_num(cells[9]),
+          midnight_outflow_cfs = pt_num(cells[10]),
+          midnight_inflow_cfs = pt_num(cells[11]),
+          midnight_storage_year_ago_af = pt_num(cells[12]),
+          midnight_basin_res_table = current_basin,
+          midnight_report_source_url = source_url,
+          midnight_data_status = status
+        )
+      }
+    }
+  }
+
+  if (length(out) == 0) {
+    warning("No CDEC RES daily reservoir rows parsed.")
+    return(pt_empty_res_daily_tbl())
+  }
+
+  dplyr::bind_rows(out) |>
+    dplyr::distinct(.data$cdec_id, .keep_all = TRUE)
+}
+
+
 pt_make_feature <- function(row) {
   props <- as.list(row)
   props$longitude <- NULL
@@ -493,34 +654,74 @@ station_index <- station_index_raw |>
     cnrfc_match_method = as.character(.data$cnrfc_match_method)
   )
 
-# ---- 5. Fetch and parse current storage ------------------------------------
+# ---- 5. Fetch and parse latest + daily reservoir storage ---------------------
 
+## Latest / near-live CDEC sensor-15 storage table.  This table can be partial,
+## especially when CDEC is missing current reservoir observations.  Do not treat
+## partial coverage as a parser failure; report it clearly in the feed summary
+## and in the BRIM Ops panel.
 storage_html <- pt_fetch_text(cdec_getall_url, label = "CDEC latest reservoir storage table")
-storage_tbl <- pt_parse_getall_storage(storage_html)
+
+storage_tbl <- tryCatch(
+  pt_parse_getall_storage(storage_html),
+  error = function(e) {
+    warning("Could not parse CDEC latest sensor-15 storage table: ", conditionMessage(e))
+    pt_empty_latest_storage_tbl()
+  }
+)
 
 message("CDEC latest storage rows parsed: ", nrow(storage_tbl))
 message("CDEC latest storage rows with numeric storage_af: ", sum(!is.na(storage_tbl$storage_af)))
 
 if (nrow(storage_tbl) > 0 && all(is.na(storage_tbl$storage_af))) {
+  warning(
+    "CDEC latest storage rows were parsed, but storage_af is NA for every row. ",
+    "Continuing with daily RES report only if available."
+  )
+  storage_tbl <- pt_empty_latest_storage_tbl()
+}
+
+## Daily RES summary ending at midnight.  This is not live, but it provides a
+## useful daily hydrologic snapshot and sometimes includes context fields that
+## the latest table does not provide.
+res_daily_html <- pt_fetch_text(cdec_res_daily_url, label = "CDEC RES daily reservoir report")
+midnight_tbl <- pt_parse_res_daily_report(res_daily_html, source_url = cdec_res_daily_url)
+
+message("CDEC RES daily rows parsed: ", nrow(midnight_tbl))
+message("CDEC RES daily rows with midnight_storage_af: ", sum(!is.na(midnight_tbl$midnight_storage_af)))
+
+if (
+  sum(!is.na(storage_tbl$storage_af)) == 0 &&
+  sum(!is.na(midnight_tbl$midnight_storage_af)) == 0
+) {
   stop(
-    "CDEC storage rows were parsed, but storage_af is NA for every row. ",
-    "This usually means CDEC changed the value-cell text or unit formatting. ",
-    "Example value cells should be inspected before writing an empty GeoJSON."
+    "Neither CDEC latest storage nor CDEC RES daily midnight storage produced usable storage values. ",
+    "Refusing to write an empty/degraded GeoJSON."
   )
 }
 
 # ---- 5.1 Fetch CNRFC reservoir-product availability -------------------------
 #
 # These product lists determine whether a live CDEC reservoir popup should show
-# a CNRFC reservoir-inflow or reservoir-release link.  If CNRFC changes the
-# products or adds reservoirs, the next scheduled feed build can pick that up
-# without requiring a BRIM HTML rebuild.
+# CNRFC reservoir-inflow, ensemble-forecast, or reservoir-release links.  If
+# CNRFC changes the products or adds reservoirs, the next scheduled feed build
+# can pick that up without requiring a BRIM HTML rebuild.
+#
+# CNRFC product pages can contain non-UTF-8 bytes.  pt_fetch_text() and
+# pt_extract_cnrfc_product_ids() force safe UTF-8 so a single odd character does
+# not zero out the inflow/release availability lists.
 
 known_cnrfc_ids <- sort(unique(pt_chr(station_index$cnrfc_nws_id)))
 
 cnrfc_inflow_ids <- pt_fetch_cnrfc_product_ids(
   url = cnrfc_inflow_list_url,
   label = "CNRFC reservoir inflow product list",
+  known_ids = known_cnrfc_ids
+)
+
+cnrfc_ensemble_ids <- pt_fetch_cnrfc_product_ids(
+  url = cnrfc_ensemble_list_url,
+  label = "CNRFC ensemble product list",
   known_ids = known_cnrfc_ids
 )
 
@@ -536,19 +737,29 @@ usace_ca_lookup <- pt_usace_ca_reservoir_lookup(usace_ca_plots_url)
 
 latest_tbl <- station_index |>
   dplyr::left_join(storage_tbl, by = "cdec_id") |>
+  dplyr::left_join(midnight_tbl, by = "cdec_id") |>
   dplyr::left_join(usace_ca_lookup, by = "cdec_id") |>
-  dplyr::filter(!is.na(.data$storage_af)) |>
+  dplyr::filter(!is.na(.data$storage_af) | !is.na(.data$midnight_storage_af)) |>
   dplyr::mutate(
     storage_maf = .data$storage_af / 1e6,
+    midnight_storage_maf = .data$midnight_storage_af / 1e6,
+    display_storage_af = dplyr::coalesce(.data$storage_af, .data$midnight_storage_af),
+    display_storage_maf = .data$display_storage_af / 1e6,
+    display_storage_source = dplyr::if_else(!is.na(.data$storage_af), "latest", "midnight_daily"),
+    has_latest_storage = !is.na(.data$storage_af),
+    has_midnight_storage = !is.na(.data$midnight_storage_af),
     has_cnrfc_inflow = !is.na(.data$cnrfc_nws_id) & .data$cnrfc_nws_id %in% cnrfc_inflow_ids,
+    has_cnrfc_ensemble = !is.na(.data$cnrfc_nws_id) & .data$cnrfc_nws_id %in% cnrfc_ensemble_ids,
     has_cnrfc_release = !is.na(.data$cnrfc_nws_id) & .data$cnrfc_nws_id %in% cnrfc_release_ids,
     ## CNRFC reservoir-link conventions:
     ##   - obsRiver_hc.php is the observed river/reservoir conditions page and
     ##     can show reservoir elevation/storage detail for reservoir points.
     ##   - reservoir.php is the reservoir-inflow / graphical RVF page.
     ##   - ensembleProduct.php?prodID=3 is the HEFS/ensemble forecast page and
-    ##     is shown only where the current CNRFC inflow product list includes
-    ##     the NWS/CNRFC ID.
+    ##     is shown only where the current CNRFC ensemble product list includes
+    ##     the NWS/CNRFC ID.  This is intentionally independent of deterministic
+    ##     reservoir-inflow availability because the ensemble point set is mixed
+    ##     and may not exactly match the deterministic reservoir-inflow list.
     ##   - reservoirRelease.php is the reservoir-release page and is shown only
     ##     where the current CNRFC release product list includes the NWS/CNRFC ID.
     cnrfc_obs_url = dplyr::if_else(
@@ -562,7 +773,7 @@ latest_tbl <- station_index |>
       NA_character_
     ),
     cnrfc_ensemble_url = dplyr::if_else(
-      .data$has_cnrfc_inflow,
+      .data$has_cnrfc_ensemble,
       paste0("https://www.cnrfc.noaa.gov/ensembleProduct.php?id=", .data$cnrfc_nws_id, "&prodID=3"),
       NA_character_
     ),
@@ -574,19 +785,40 @@ latest_tbl <- station_index |>
     ## CDEC labels many service times as PST, but the latest-storage web table
     ## displays Pacific clock time.  Use America/Los_Angeles so daylight-saving
     ## dates are not shifted one hour into the future.
-    obs_datetime_pacific = lubridate::mdy_hm(.data$obs_datetime_cdec_display, tz = "America/Los_Angeles"),
-    obs_datetime_utc = format(lubridate::with_tz(.data$obs_datetime_pacific, "UTC"), "%Y-%m-%dT%H:%M:%SZ"),
+    obs_datetime_pacific = dplyr::if_else(
+      !is.na(.data$obs_datetime_cdec_display),
+      lubridate::mdy_hm(.data$obs_datetime_cdec_display, tz = "America/Los_Angeles"),
+      as.POSIXct(NA_real_, origin = "1970-01-01", tz = "America/Los_Angeles")
+    ),
+    obs_datetime_utc = dplyr::if_else(
+      !is.na(.data$obs_datetime_pacific),
+      format(lubridate::with_tz(.data$obs_datetime_pacific, "UTC"), "%Y-%m-%dT%H:%M:%SZ"),
+      NA_character_
+    ),
     obs_age_hours = as.numeric(difftime(Sys.time(), .data$obs_datetime_pacific, units = "hours")),
-    pct_capacity = dplyr::if_else(!is.na(.data$capacity_af) & .data$capacity_af > 0, 100 * .data$storage_af / .data$capacity_af, NA_real_),
+    ## Prefer station-index capacity if it exists; otherwise use the RES daily
+    ## capacity field as stable static metadata.  Do not treat capacity as a live
+    ## observation.
+    capacity_af = dplyr::coalesce(.data$capacity_af, .data$capacity_af_res),
+    pct_capacity = dplyr::if_else(
+      !is.na(.data$capacity_af) & .data$capacity_af > 0 & !is.na(.data$storage_af),
+      100 * .data$storage_af / .data$capacity_af,
+      NA_real_
+    ),
     feed_build_time_utc = feed_build_time_utc,
-    feed_source = "CDEC getAll sensor 15 latest reservoir storage table",
+    feed_source = "CDEC latest sensor-15 table with CDEC RES daily midnight context",
     source_url = cdec_getall_url,
-    obs_stale_12h = .data$obs_age_hours > 12,
-    obs_stale_24h = .data$obs_age_hours > 24,
+    obs_stale_12h = !is.na(.data$obs_age_hours) & .data$obs_age_hours > 12,
+    obs_stale_24h = !is.na(.data$obs_age_hours) & .data$obs_age_hours > 24,
     data_quality_note_live = dplyr::case_when(
-      .data$obs_stale_24h ~ "CDEC latest storage observation is older than 24 hours; review before use.",
-      .data$obs_stale_12h ~ "CDEC latest storage observation is older than 12 hours; use caution.",
-      TRUE ~ "CDEC provisional latest storage observation."
+      !.data$has_latest_storage & .data$has_midnight_storage ~
+        "Latest CDEC sensor-15 storage is not present; feature is shown using CDEC RES daily midnight storage.",
+      .data$obs_stale_24h ~
+        "CDEC latest storage observation is older than 24 hours; review before use.",
+      .data$obs_stale_12h ~
+        "CDEC latest storage observation is older than 12 hours; use caution.",
+      TRUE ~
+        "CDEC provisional latest storage observation."
     )
   ) |>
   dplyr::select(
@@ -597,6 +829,11 @@ latest_tbl <- station_index |>
       "cdec_station_name_latest",
       "storage_af",
       "storage_maf",
+      "display_storage_af",
+      "display_storage_maf",
+      "display_storage_source",
+      "has_latest_storage",
+      "has_midnight_storage",
       "capacity_af",
       "pct_capacity",
       "obs_datetime_cdec_display",
@@ -604,6 +841,20 @@ latest_tbl <- station_index |>
       "obs_age_hours",
       "obs_stale_12h",
       "obs_stale_24h",
+      "midnight_station_name",
+      "midnight_elevation_ft",
+      "midnight_storage_af",
+      "midnight_storage_maf",
+      "midnight_storage_change_af",
+      "midnight_pct_capacity",
+      "midnight_avg_storage_af",
+      "midnight_pct_average",
+      "midnight_outflow_cfs",
+      "midnight_inflow_cfs",
+      "midnight_storage_year_ago_af",
+      "midnight_basin_res_table",
+      "midnight_report_source_url",
+      "midnight_data_status",
       "latitude",
       "longitude",
       "elevation_ft",
@@ -622,6 +873,7 @@ latest_tbl <- station_index |>
       "cnrfc_match_confidence",
       "cnrfc_match_method",
       "has_cnrfc_inflow",
+      "has_cnrfc_ensemble",
       "has_cnrfc_release",
       "cnrfc_obs_url",
       "cnrfc_inflow_url",
@@ -637,7 +889,30 @@ latest_tbl <- station_index |>
       "data_quality_note_live"
     ))
   ) |>
-  dplyr::arrange(dplyr::desc(.data$storage_af), .data$cdec_id)
+  dplyr::arrange(dplyr::desc(.data$display_storage_af), .data$cdec_id)
+
+latest_count <- sum(!is.na(latest_tbl$storage_af))
+midnight_count <- sum(!is.na(latest_tbl$midnight_storage_af))
+midnight_only_count <- sum(is.na(latest_tbl$storage_af) & !is.na(latest_tbl$midnight_storage_af))
+
+coverage_status <- dplyr::case_when(
+  latest_count == 0 && midnight_count > 0 ~ "daily_fallback_only",
+  latest_count < 60 ~ "partial_latest",
+  TRUE ~ "normal"
+)
+
+coverage_note <- dplyr::case_when(
+  coverage_status == "daily_fallback_only" ~
+    "CDEC latest sensor-15 table returned no usable current storage rows; feed is using RES daily midnight storage only.",
+  coverage_status == "partial_latest" ~
+    paste0(
+      "CDEC latest sensor-15 table currently contains fewer latest storage rows than usual (",
+      latest_count,
+      " latest rows). Daily midnight fields are included where available."
+    ),
+  TRUE ~
+    "CDEC latest sensor-15 table coverage appears normal; daily midnight fields are included where available."
+)
 
 # ---- 7. Write GeoJSON and summary ------------------------------------------
 
@@ -648,7 +923,10 @@ geojson <- list(
   name = "cdec_reservoir_latest_storage",
   feed_build_time_utc = feed_build_time_utc,
   source = cdec_getall_url,
+  daily_source = cdec_res_daily_url,
   provisional_note = "CDEC provisional data, subject to change.",
+  coverage_status = coverage_status,
+  coverage_note = coverage_note,
   feature_count = length(features),
   features = features
 )
@@ -656,17 +934,27 @@ geojson <- list(
 summary_obj <- list(
   feed_build_time_utc = feed_build_time_utc,
   source = cdec_getall_url,
+  daily_source = cdec_res_daily_url,
   station_index_rows = nrow(station_index),
   cdec_storage_rows_parsed = nrow(storage_tbl),
+  cdec_storage_rows_with_storage = sum(!is.na(storage_tbl$storage_af)),
+  cdec_res_daily_rows_parsed = nrow(midnight_tbl),
+  cdec_res_daily_rows_with_midnight_storage = sum(!is.na(midnight_tbl$midnight_storage_af)),
   output_feature_count = nrow(latest_tbl),
-  max_obs_age_hours = if (nrow(latest_tbl) > 0) max(latest_tbl$obs_age_hours, na.rm = TRUE) else NA_real_,
+  output_features_with_latest_storage = latest_count,
+  output_features_with_midnight_storage = midnight_count,
+  output_features_midnight_only = midnight_only_count,
+  coverage_status = coverage_status,
+  coverage_note = coverage_note,
+  max_obs_age_hours = if (latest_count > 0) max(latest_tbl$obs_age_hours[!is.na(latest_tbl$obs_age_hours)], na.rm = TRUE) else NA_real_,
   stale_12h_count = sum(latest_tbl$obs_stale_12h, na.rm = TRUE),
   stale_24h_count = sum(latest_tbl$obs_stale_24h, na.rm = TRUE),
   cnrfc_inflow_ids_detected = length(cnrfc_inflow_ids),
+  cnrfc_ensemble_ids_detected = length(cnrfc_ensemble_ids),
   cnrfc_release_ids_detected = length(cnrfc_release_ids),
   output_features_with_cnrfc_obs = sum(!is.na(latest_tbl$cnrfc_obs_url), na.rm = TRUE),
   output_features_with_cnrfc_inflow = sum(latest_tbl$has_cnrfc_inflow, na.rm = TRUE),
-  output_features_with_cnrfc_ensemble = sum(!is.na(latest_tbl$cnrfc_ensemble_url), na.rm = TRUE),
+  output_features_with_cnrfc_ensemble = sum(latest_tbl$has_cnrfc_ensemble, na.rm = TRUE),
   output_features_with_cnrfc_release = sum(latest_tbl$has_cnrfc_release, na.rm = TRUE),
   output_features_with_usace_plot_link = sum(!is.na(latest_tbl$usace_california_plots_url), na.rm = TRUE)
 )
@@ -696,9 +984,17 @@ message("\nDone: CDEC latest reservoir GeoJSON built.")
 message("Features: ", nrow(latest_tbl))
 message("GeoJSON:  ", out_geojson)
 message("Summary:  ", out_summary)
+message("Latest storage features: ", summary_obj$output_features_with_latest_storage)
+message("Midnight storage features: ", summary_obj$output_features_with_midnight_storage)
+message("Midnight-only features: ", summary_obj$output_features_midnight_only)
+message("Coverage status: ", summary_obj$coverage_status)
+message("Coverage note: ", summary_obj$coverage_note)
 message("Max obs age hours: ", round(summary_obj$max_obs_age_hours, 2))
 message("Stale >12h: ", summary_obj$stale_12h_count)
 message("Stale >24h: ", summary_obj$stale_24h_count)
+message("CNRFC inflow IDs detected: ", summary_obj$cnrfc_inflow_ids_detected)
+message("CNRFC ensemble IDs detected: ", summary_obj$cnrfc_ensemble_ids_detected)
+message("CNRFC release IDs detected: ", summary_obj$cnrfc_release_ids_detected)
 message("Features with CNRFC observed reservoir links: ", summary_obj$output_features_with_cnrfc_obs)
 message("Features with CNRFC inflow links: ", summary_obj$output_features_with_cnrfc_inflow)
 message("Features with CNRFC ensemble links: ", summary_obj$output_features_with_cnrfc_ensemble)
