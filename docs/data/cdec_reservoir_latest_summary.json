@@ -1,0 +1,10 @@
+{
+  "feed_build_time_utc": "2026-05-23T07:01:45Z",
+  "source": "https://cdec.water.ca.gov/dynamicapp/getAll?sens_num=15",
+  "station_index_rows": 218,
+  "cdec_storage_rows_parsed": 74,
+  "output_feature_count": 72,
+  "max_obs_age_hours": 4.0336,
+  "stale_12h_count": 0,
+  "stale_24h_count": 0
+}
