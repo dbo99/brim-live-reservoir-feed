@@ -73,6 +73,11 @@ cnrfc_role_overrides_csv <- Sys.getenv(
   unset = "data/input/cnrfc_reservoir_role_overrides.csv"
 )
 
+capacity_overrides_csv <- Sys.getenv(
+  "CDEC_RESERVOIR_CAPACITY_OVERRIDES_CSV",
+  unset = "data/input/cdec_reservoir_capacity_overrides.csv"
+)
+
 out_geojson <- Sys.getenv(
   "CDEC_RESERVOIR_GEOJSON",
   unset = "docs/data/cdec_reservoir_latest.geojson"
@@ -178,6 +183,76 @@ pt_read_role_overrides <- function(path) {
       "cnrfc_ensemble_id_override",
       "cnrfc_release_id_override",
       "cnrfc_role_override_note"
+    ) |>
+    dplyr::distinct(.data$cdec_id, .keep_all = TRUE)
+}
+
+pt_empty_capacity_overrides <- function() {
+  tibble::tibble(
+    cdec_id = character(),
+    capacity_af_override = numeric(),
+    capacity_source_name = character(),
+    capacity_source_url = character(),
+    capacity_source_date_accessed = character(),
+    capacity_confidence = character(),
+    capacity_note = character()
+  )
+}
+
+pt_read_capacity_overrides <- function(path) {
+  if (!file.exists(path)) {
+    message("CDEC capacity-override CSV not found; continuing without static capacity overrides: ", path)
+    return(pt_empty_capacity_overrides())
+  }
+
+  x <- readr::read_csv(
+    path,
+    show_col_types = FALSE,
+    col_types = readr::cols(.default = readr::col_character())
+  )
+
+  required_cols <- c("cdec_id", "capacity_af")
+
+  missing_cols <- setdiff(required_cols, names(x))
+
+  if (length(missing_cols) > 0) {
+    stop("CDEC capacity-override CSV is missing required column(s): ", paste(missing_cols, collapse = ", "))
+  }
+
+  optional_cols <- c(
+    "capacity_source_name",
+    "capacity_source_url",
+    "capacity_source_date_accessed",
+    "capacity_confidence",
+    "capacity_note"
+  )
+
+  for (nm in optional_cols) {
+    if (!nm %in% names(x)) {
+      x[[nm]] <- NA_character_
+    }
+  }
+
+  x |>
+    dplyr::mutate(
+      cdec_id = toupper(pt_chr(.data$cdec_id)),
+      capacity_af_override = pt_num(.data$capacity_af),
+      capacity_source_name = as.character(.data$capacity_source_name),
+      capacity_source_url = as.character(.data$capacity_source_url),
+      capacity_source_date_accessed = as.character(.data$capacity_source_date_accessed),
+      capacity_confidence = as.character(.data$capacity_confidence),
+      capacity_note = as.character(.data$capacity_note)
+    ) |>
+    dplyr::filter(!is.na(.data$cdec_id), .data$cdec_id != "") |>
+    dplyr::filter(!is.na(.data$capacity_af_override), .data$capacity_af_override > 0) |>
+    dplyr::select(
+      "cdec_id",
+      "capacity_af_override",
+      "capacity_source_name",
+      "capacity_source_url",
+      "capacity_source_date_accessed",
+      "capacity_confidence",
+      "capacity_note"
     ) |>
     dplyr::distinct(.data$cdec_id, .keep_all = TRUE)
 }
@@ -842,8 +917,10 @@ pt_lookup_cnrfc_availability <- function(ids, col) {
 }
 
 role_overrides_tbl <- pt_read_role_overrides(cnrfc_role_overrides_csv)
+capacity_overrides_tbl <- pt_read_capacity_overrides(capacity_overrides_csv)
 
 message("CNRFC role override rows read: ", nrow(role_overrides_tbl))
+message("CDEC capacity override rows read: ", nrow(capacity_overrides_tbl))
 
 usace_ca_lookup <- pt_usace_ca_reservoir_lookup(usace_ca_plots_url)
 
@@ -854,6 +931,7 @@ latest_tbl <- station_index |>
   dplyr::left_join(midnight_tbl, by = "cdec_id") |>
   dplyr::left_join(cnrfc_availability_tbl, by = "cnrfc_nws_id") |>
   dplyr::left_join(role_overrides_tbl, by = "cdec_id") |>
+  dplyr::left_join(capacity_overrides_tbl, by = "cdec_id") |>
   dplyr::left_join(usace_ca_lookup, by = "cdec_id") |>
   dplyr::filter(!is.na(.data$storage_af) | !is.na(.data$midnight_storage_af)) |>
   dplyr::mutate(
@@ -936,9 +1014,19 @@ latest_tbl <- station_index |>
     ),
     obs_age_hours = as.numeric(difftime(Sys.time(), .data$obs_datetime_pacific, units = "hours")),
     ## Prefer station-index capacity if it exists; otherwise use the RES daily
-    ## capacity field as stable static metadata.  Do not treat capacity as a live
-    ## observation.
-    capacity_af = dplyr::coalesce(.data$capacity_af, .data$capacity_af_res),
+    ## capacity field; otherwise use the reviewed static capacity override table.
+    ## Capacity is stable metadata, not a live observation.
+    capacity_af = dplyr::coalesce(
+      .data$capacity_af,
+      .data$capacity_af_res,
+      .data$capacity_af_override
+    ),
+    capacity_source_display = dplyr::case_when(
+      !is.na(.data$capacity_af_res) & .data$capacity_af == .data$capacity_af_res ~ "CDEC RES daily report",
+      !is.na(.data$capacity_af_override) & .data$capacity_af == .data$capacity_af_override ~ .data$capacity_source_name,
+      !is.na(.data$capacity_af) ~ "BRIM station index",
+      TRUE ~ NA_character_
+    ),
     pct_capacity = dplyr::if_else(
       !is.na(.data$capacity_af) & .data$capacity_af > 0 & !is.na(.data$storage_af),
       100 * .data$storage_af / .data$capacity_af,
@@ -974,6 +1062,12 @@ latest_tbl <- station_index |>
       "has_latest_storage",
       "has_midnight_storage",
       "capacity_af",
+      "capacity_source_display",
+      "capacity_source_name",
+      "capacity_source_url",
+      "capacity_source_date_accessed",
+      "capacity_confidence",
+      "capacity_note",
       "pct_capacity",
       "obs_datetime_cdec_display",
       "obs_datetime_utc",
@@ -1117,6 +1211,10 @@ summary_obj <- list(
   cnrfc_role_override_csv = cnrfc_role_overrides_csv,
   cnrfc_role_override_rows = nrow(role_overrides_tbl),
   output_features_with_cnrfc_role_override = sum(!is.na(latest_tbl$cnrfc_role_override_note) & latest_tbl$cnrfc_role_override_note != "", na.rm = TRUE),
+  capacity_override_csv = capacity_overrides_csv,
+  capacity_override_rows = nrow(capacity_overrides_tbl),
+  output_features_using_capacity_override = sum(!is.na(latest_tbl$capacity_source_name) & latest_tbl$capacity_source_name != "", na.rm = TRUE),
+  output_features_with_capacity = sum(!is.na(latest_tbl$capacity_af) & latest_tbl$capacity_af > 0, na.rm = TRUE),
   cnrfc_inflow_ids_available = sum(cnrfc_availability_tbl$has_cnrfc_inflow, na.rm = TRUE),
   cnrfc_ensemble_ids_available = sum(cnrfc_availability_tbl$has_cnrfc_ensemble, na.rm = TRUE),
   cnrfc_release_ids_available = sum(cnrfc_availability_tbl$has_cnrfc_release, na.rm = TRUE),
@@ -1165,6 +1263,9 @@ message("Stale >24h: ", summary_obj$stale_24h_count)
 message("CNRFC availability rows: ", summary_obj$cnrfc_availability_rows)
 message("CNRFC role override rows: ", summary_obj$cnrfc_role_override_rows)
 message("Features using CNRFC role overrides: ", summary_obj$output_features_with_cnrfc_role_override)
+message("CDEC capacity override rows: ", summary_obj$capacity_override_rows)
+message("Features using capacity overrides: ", summary_obj$output_features_using_capacity_override)
+message("Features with capacity: ", summary_obj$output_features_with_capacity)
 message("CNRFC inflow IDs available: ", summary_obj$cnrfc_inflow_ids_available)
 message("CNRFC ensemble IDs available: ", summary_obj$cnrfc_ensemble_ids_available)
 message("CNRFC release IDs available: ", summary_obj$cnrfc_release_ids_available)
