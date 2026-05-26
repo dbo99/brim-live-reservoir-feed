@@ -1,0 +1,5 @@
+cnrfc_nws_id,cdec_id,has_cnrfc_obs,note
+SUAC1,SPG,FALSE,"Reviewed 2026-05-26: Spaulding/SUAC1 CNRFC page appears to provide inflow/ensemble products but not useful observed reservoir-storage data; suppress observed/current reservoir popup link."
+FOCC1,LKF,FALSE,"Reviewed 2026-05-26: Fordyce/FOCC1 CNRFC page appears to provide inflow/ensemble products but not useful observed reservoir-storage data; suppress observed/current reservoir popup link."
+BWKC1,BWN,TRUE,"Reviewed 2026-05-26: Bowman/BWKC1 observed/current reservoir page appears useful for storage fallback review."
+ISAC1,ISB,TRUE,"Reviewed 2026-05-26: Isabella/ISAC1 observed/current reservoir page appears useful for storage/release context."
