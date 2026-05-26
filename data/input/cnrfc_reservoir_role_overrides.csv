@@ -1,0 +1,3 @@
+cdec_id,cnrfc_obs_id,cnrfc_inflow_id,cnrfc_ensemble_id,cnrfc_release_id,note
+ENG,ENGC1,HLEC1,HLEC1,HLEC1,Englebright/USACE CDEC record: observed/current conditions use ENGC1; reservoir inflow ensemble and release schedule products use HLEC1.
+ENB,ENGC1,HLEC1,HLEC1,HLEC1,Englebright/YCWA CDEC record: observed/current conditions use ENGC1; reservoir inflow ensemble and release schedule products use HLEC1.
