@@ -1,3 +1,11 @@
 cdec_id,cnrfc_obs_id,cnrfc_inflow_id,cnrfc_ensemble_id,cnrfc_release_id,note
 ENG,ENGC1,HLEC1,HLEC1,HLEC1,Englebright/USACE CDEC record: observed/current conditions use ENGC1; reservoir inflow ensemble and release schedule products use HLEC1.
 ENB,ENGC1,HLEC1,HLEC1,HLEC1,Englebright/YCWA CDEC record: observed/current conditions use ENGC1; reservoir inflow ensemble and release schedule products use HLEC1.
+DNP,NDPC1,NDPC1,NDPC1,NDPC1,"New Don Pedro: CNRFC reservoir page uses NDPC1 for observed/current conditions, deterministic inflow, ensemble forecast, and reservoir release schedule products."
+EXC,EXQC1,EXQC1,EXQC1,EXQC1,"Exchequer: CNRFC reservoir page uses EXQC1 for observed/current conditions, deterministic inflow, ensemble forecast, and reservoir release schedule products."
+ISB,ISAC1,ISAC1,ISAC1,ISAC1,"Lake Isabella: CNRFC reservoir page uses ISAC1 for observed/current conditions, deterministic inflow, ensemble forecast, and reservoir release schedule products."
+PRS,PSRC1,PSRC1,PSRC1,PSRC1,"Prosser Reservoir: CNRFC reservoir page uses PSRC1 for observed/current conditions, deterministic inflow, ensemble forecast, and reservoir release schedule products."
+COY,LAMC1,LAMC1,LAMC1,LAMC1,Lake Mendocino / Coyote Valley: CNRFC reservoir products use LAMC1.
+CLA,CLKC1,CLKC1,CLKC1,CLKC1,Cedar Lake / CDEC CLA: CNRFC reservoir products use CLKC1.
+INV,INVC1,INVC1,INVC1,INVC1,Indian Valley Reservoir / CDEC INV: CNRFC reservoir products use INVC1.
+LPY,PLBC1,PLBC1,PLBC1,PLBC1,Lake Pillsbury / CDEC LPY: CNRFC reservoir products use PLBC1.
