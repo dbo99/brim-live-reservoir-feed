@@ -1,16 +1,16 @@
 {
-  "availability_build_time_utc": "2026-05-26T05:12:08Z",
+  "availability_build_time_utc": "2026-05-26T16:34:33Z",
   "station_index_csv": "data/input/cdec_reservoir_station_index.csv",
   "output_csv": "data/input/cnrfc_reservoir_product_availability.csv",
-  "known_cnrfc_ids": 128,
+  "known_cnrfc_ids": 134,
   "role_override_csv": "data/input/cnrfc_reservoir_role_overrides.csv",
-  "role_override_rows": 2,
-  "role_override_ids": 4,
+  "role_override_rows": 10,
+  "role_override_ids": 12,
   "inflow_source": "https://www.cnrfc.noaa.gov/reservoir.php?id=ANTC1",
   "ensemble_source": "https://www.cnrfc.noaa.gov/ensembleProduct.php?id=ANTC1&prodID=3",
   "release_source": "https://www.cnrfc.noaa.gov/reservoirRelease.php?id=KWKC1",
-  "cnrfc_inflow_ids_available": 76,
-  "cnrfc_ensemble_ids_available": 80,
-  "cnrfc_release_ids_available": 43,
-  "rows_written": 128
+  "cnrfc_inflow_ids_available": 82,
+  "cnrfc_ensemble_ids_available": 86,
+  "cnrfc_release_ids_available": 49,
+  "rows_written": 134
 }
