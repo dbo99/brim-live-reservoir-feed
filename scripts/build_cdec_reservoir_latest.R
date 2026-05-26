@@ -63,6 +63,11 @@ station_index_csv <- Sys.getenv(
   unset = "data/input/cdec_reservoir_station_index.csv"
 )
 
+cnrfc_availability_csv <- Sys.getenv(
+  "CNRFC_RESERVOIR_PRODUCT_AVAILABILITY_CSV",
+  unset = "data/input/cnrfc_reservoir_product_availability.csv"
+)
+
 out_geojson <- Sys.getenv(
   "CDEC_RESERVOIR_GEOJSON",
   unset = "docs/data/cdec_reservoir_latest.geojson"
@@ -87,31 +92,26 @@ cdec_res_daily_url <- Sys.getenv(
   unset = "https://cdec.water.ca.gov/reportapp/javareports?name=RES"
 )
 
-cnrfc_inflow_list_url <- Sys.getenv(
-  "CNRFC_RSVR_INFLOW_LIST_URL",
-  unset = "https://www.cnrfc.noaa.gov/?product=rsvrInflow"
-)
-
-cnrfc_release_list_url <- Sys.getenv(
-  "CNRFC_RSVR_RELEASE_LIST_URL",
-  unset = "https://www.cnrfc.noaa.gov/?product=rsvrRelease"
-)
-
-cnrfc_ensemble_list_url <- Sys.getenv(
-  "CNRFC_ENSEMBLE_LIST_URL",
-  ## The ensemble product page carries the mixed river/reservoir ensemble-point
-  ## selector/list.  ANTC1 is used only as a stable example reservoir point for
-  ## opening the product page; all detected IDs are intersected with the BRIM
-  ## CDEC-CNRFC crosswalk before links are written.
-  unset = "https://www.cnrfc.noaa.gov/ensembleProduct.php?id=ANTC1&prodID=3"
-)
-
 usace_ca_plots_url <- Sys.getenv(
   "USACE_CA_RESERVOIR_PLOTS_URL",
   unset = "https://www.spk-wc.usace.army.mil/plots/california.html"
 )
 
 feed_build_time_utc <- format(lubridate::with_tz(Sys.time(), "UTC"), "%Y-%m-%dT%H:%M:%SZ")
+
+min_latest_rows_to_publish <- suppressWarnings(as.integer(Sys.getenv(
+  "CDEC_MIN_LATEST_ROWS_TO_PUBLISH",
+  unset = "30"
+)))
+
+if (is.na(min_latest_rows_to_publish) || min_latest_rows_to_publish < 1) {
+  min_latest_rows_to_publish <- 30L
+}
+
+allow_degraded_publish <- tolower(Sys.getenv(
+  "CDEC_ALLOW_DEGRADED_PUBLISH",
+  unset = "false"
+)) %in% c("true", "1", "yes", "y")
 
 # ---- 3. Helpers -------------------------------------------------------------
 
@@ -700,36 +700,80 @@ if (
   )
 }
 
-# ---- 5.1 Fetch CNRFC reservoir-product availability -------------------------
+# ---- 5.1 Read prebuilt CNRFC reservoir-product availability ------------------
 #
-# These product lists determine whether a live CDEC reservoir popup should show
-# CNRFC reservoir-inflow, ensemble-forecast, or reservoir-release links.  If
-# CNRFC changes the products or adds reservoirs, the next scheduled feed build
-# can pick that up without requiring a BRIM HTML rebuild.
+# CNRFC product availability is metadata, not live storage data.  It is built by:
+#   scripts/preprocess_cnrfc_reservoir_product_availability.R
 #
-# CNRFC product pages can contain non-UTF-8 bytes.  pt_fetch_text() and
-# pt_extract_cnrfc_product_ids() force safe UTF-8 so a single odd character does
-# not zero out the inflow/release availability lists.
+# The GitHub Action should not scrape CNRFC product lists every six hours.  It
+# reads this stable CSV instead.  Re-run the preprocessor manually when CNRFC
+# products are expected to change, for example after water-year rollover, during
+# summer development updates, or when a missing/extra product link is observed.
 
-known_cnrfc_ids <- sort(unique(pt_chr(station_index$cnrfc_nws_id)))
+if (!file.exists(cnrfc_availability_csv)) {
+  stop(
+    "CNRFC reservoir product-availability CSV not found: ", cnrfc_availability_csv,
+    "\nRun scripts/preprocess_cnrfc_reservoir_product_availability.R first and upload ",
+    "data/input/cnrfc_reservoir_product_availability.csv to the feed repo."
+  )
+}
 
-cnrfc_inflow_ids <- pt_fetch_cnrfc_product_ids(
-  url = cnrfc_inflow_list_url,
-  label = "CNRFC reservoir inflow product list",
-  known_ids = known_cnrfc_ids
+cnrfc_availability_raw <- readr::read_csv(
+  cnrfc_availability_csv,
+  show_col_types = FALSE,
+  col_types = readr::cols(.default = readr::col_character())
 )
 
-cnrfc_ensemble_ids <- pt_fetch_cnrfc_product_ids(
-  url = cnrfc_ensemble_list_url,
-  label = "CNRFC ensemble product list",
-  known_ids = known_cnrfc_ids
+required_availability_cols <- c(
+  "cnrfc_nws_id",
+  "has_cnrfc_inflow",
+  "has_cnrfc_ensemble",
+  "has_cnrfc_release",
+  "cnrfc_obs_url",
+  "cnrfc_inflow_url",
+  "cnrfc_ensemble_url",
+  "cnrfc_release_url"
 )
 
-cnrfc_release_ids <- pt_fetch_cnrfc_product_ids(
-  url = cnrfc_release_list_url,
-  label = "CNRFC reservoir release product list",
-  known_ids = known_cnrfc_ids
-)
+missing_availability_cols <- setdiff(required_availability_cols, names(cnrfc_availability_raw))
+
+if (length(missing_availability_cols) > 0) {
+  stop(
+    "CNRFC availability CSV is missing required column(s): ",
+    paste(missing_availability_cols, collapse = ", ")
+  )
+}
+
+if (!"availability_build_time_utc" %in% names(cnrfc_availability_raw)) {
+  cnrfc_availability_raw$availability_build_time_utc <- NA_character_
+}
+
+pt_as_logical <- function(x) {
+  tolower(as.character(x)) %in% c("true", "t", "1", "yes", "y")
+}
+
+cnrfc_availability_tbl <- cnrfc_availability_raw |>
+  dplyr::mutate(
+    cnrfc_nws_id = toupper(pt_chr(.data$cnrfc_nws_id)),
+    has_cnrfc_inflow = pt_as_logical(.data$has_cnrfc_inflow),
+    has_cnrfc_ensemble = pt_as_logical(.data$has_cnrfc_ensemble),
+    has_cnrfc_release = pt_as_logical(.data$has_cnrfc_release),
+    cnrfc_obs_url = pt_chr(.data$cnrfc_obs_url),
+    cnrfc_inflow_url = pt_chr(.data$cnrfc_inflow_url),
+    cnrfc_ensemble_url = pt_chr(.data$cnrfc_ensemble_url),
+    cnrfc_release_url = pt_chr(.data$cnrfc_release_url),
+    availability_build_time_utc = dplyr::coalesce(
+      as.character(.data$availability_build_time_utc),
+      NA_character_
+    )
+  ) |>
+  dplyr::filter(!is.na(.data$cnrfc_nws_id), .data$cnrfc_nws_id != "") |>
+  dplyr::distinct(.data$cnrfc_nws_id, .keep_all = TRUE)
+
+message("CNRFC availability rows read: ", nrow(cnrfc_availability_tbl))
+message("CNRFC availability inflow IDs: ", sum(cnrfc_availability_tbl$has_cnrfc_inflow, na.rm = TRUE))
+message("CNRFC availability ensemble IDs: ", sum(cnrfc_availability_tbl$has_cnrfc_ensemble, na.rm = TRUE))
+message("CNRFC availability release IDs: ", sum(cnrfc_availability_tbl$has_cnrfc_release, na.rm = TRUE))
 
 usace_ca_lookup <- pt_usace_ca_reservoir_lookup(usace_ca_plots_url)
 
@@ -738,6 +782,7 @@ usace_ca_lookup <- pt_usace_ca_reservoir_lookup(usace_ca_plots_url)
 latest_tbl <- station_index |>
   dplyr::left_join(storage_tbl, by = "cdec_id") |>
   dplyr::left_join(midnight_tbl, by = "cdec_id") |>
+  dplyr::left_join(cnrfc_availability_tbl, by = "cnrfc_nws_id") |>
   dplyr::left_join(usace_ca_lookup, by = "cdec_id") |>
   dplyr::filter(!is.na(.data$storage_af) | !is.na(.data$midnight_storage_af)) |>
   dplyr::mutate(
@@ -748,40 +793,32 @@ latest_tbl <- station_index |>
     display_storage_source = dplyr::if_else(!is.na(.data$storage_af), "latest", "midnight_daily"),
     has_latest_storage = !is.na(.data$storage_af),
     has_midnight_storage = !is.na(.data$midnight_storage_af),
-    has_cnrfc_inflow = !is.na(.data$cnrfc_nws_id) & .data$cnrfc_nws_id %in% cnrfc_inflow_ids,
-    has_cnrfc_ensemble = !is.na(.data$cnrfc_nws_id) & .data$cnrfc_nws_id %in% cnrfc_ensemble_ids,
-    has_cnrfc_release = !is.na(.data$cnrfc_nws_id) & .data$cnrfc_nws_id %in% cnrfc_release_ids,
+    has_cnrfc_inflow = dplyr::coalesce(.data$has_cnrfc_inflow, FALSE),
+    has_cnrfc_ensemble = dplyr::coalesce(.data$has_cnrfc_ensemble, FALSE),
+    has_cnrfc_release = dplyr::coalesce(.data$has_cnrfc_release, FALSE),
     ## CNRFC reservoir-link conventions:
     ##   - obsRiver_hc.php is the observed river/reservoir conditions page and
     ##     can show reservoir elevation/storage detail for reservoir points.
-    ##   - reservoir.php is the reservoir-inflow / graphical RVF page.
+    ##   - reservoir.php is the deterministic reservoir-inflow / graphical RVF
+    ##     page and is shown only when the prebuilt availability table says the
+    ##     ID is in the CNRFC reservoir-inflow product list.
     ##   - ensembleProduct.php?prodID=3 is the HEFS/ensemble forecast page and
-    ##     is shown only where the current CNRFC ensemble product list includes
-    ##     the NWS/CNRFC ID.  This is intentionally independent of deterministic
-    ##     reservoir-inflow availability because the ensemble point set is mixed
-    ##     and may not exactly match the deterministic reservoir-inflow list.
-    ##   - reservoirRelease.php is the reservoir-release page and is shown only
-    ##     where the current CNRFC release product list includes the NWS/CNRFC ID.
-    cnrfc_obs_url = dplyr::if_else(
-      !is.na(.data$cnrfc_nws_id) & .data$cnrfc_nws_id != "",
-      paste0("https://www.cnrfc.noaa.gov/obsRiver_hc.php?id=", .data$cnrfc_nws_id),
-      NA_character_
+    ##     is shown only when the availability table says the ID is in the CNRFC
+    ##     ensemble product list.
+    ##   - reservoirRelease.php is the reservoir-release schedule page and is
+    ##     shown only when the availability table says the ID is in the CNRFC
+    ##     reservoir-release product list.
+    cnrfc_obs_url = dplyr::coalesce(
+      .data$cnrfc_obs_url,
+      dplyr::if_else(
+        !is.na(.data$cnrfc_nws_id) & .data$cnrfc_nws_id != "",
+        paste0("https://www.cnrfc.noaa.gov/obsRiver_hc.php?id=", .data$cnrfc_nws_id),
+        NA_character_
+      )
     ),
-    cnrfc_inflow_url = dplyr::if_else(
-      .data$has_cnrfc_inflow,
-      paste0("https://www.cnrfc.noaa.gov/reservoir.php?id=", .data$cnrfc_nws_id),
-      NA_character_
-    ),
-    cnrfc_ensemble_url = dplyr::if_else(
-      .data$has_cnrfc_ensemble,
-      paste0("https://www.cnrfc.noaa.gov/ensembleProduct.php?id=", .data$cnrfc_nws_id, "&prodID=3"),
-      NA_character_
-    ),
-    cnrfc_release_url = dplyr::if_else(
-      .data$has_cnrfc_release,
-      paste0("https://www.cnrfc.noaa.gov/reservoirRelease.php?id=", .data$cnrfc_nws_id),
-      NA_character_
-    ),
+    cnrfc_inflow_url = dplyr::if_else(.data$has_cnrfc_inflow, .data$cnrfc_inflow_url, NA_character_),
+    cnrfc_ensemble_url = dplyr::if_else(.data$has_cnrfc_ensemble, .data$cnrfc_ensemble_url, NA_character_),
+    cnrfc_release_url = dplyr::if_else(.data$has_cnrfc_release, .data$cnrfc_release_url, NA_character_),
     ## CDEC labels many service times as PST, but the latest-storage web table
     ## displays Pacific clock time.  Use America/Los_Angeles so daylight-saving
     ## dates are not shifted one hour into the future.
@@ -914,6 +951,23 @@ coverage_note <- dplyr::case_when(
     "CDEC latest sensor-15 table coverage appears normal; daily midnight fields are included where available."
 )
 
+## Fail-safe publish guard -----------------------------------------------------
+##
+## CDEC's latest sensor-15 table can intermittently return a very thin subset of
+## reservoirs.  When running in GitHub Actions, failing here is intentional: the
+## workflow stops before write/commit, so GitHub Pages keeps serving the prior
+## good GeoJSON instead of replacing it with a mostly empty layer.
+if (latest_count < min_latest_rows_to_publish && !isTRUE(allow_degraded_publish)) {
+  stop(
+    "CDEC latest sensor-15 coverage is too thin to publish safely: ",
+    latest_count,
+    " latest-storage features, threshold = ",
+    min_latest_rows_to_publish,
+    ". Refusing to overwrite the previous feed. ",
+    "Set CDEC_ALLOW_DEGRADED_PUBLISH=true only for deliberate debugging."
+  )
+}
+
 # ---- 7. Write GeoJSON and summary ------------------------------------------
 
 features <- purrr::map(seq_len(nrow(latest_tbl)), ~ pt_make_feature(latest_tbl[.x, , drop = FALSE]))
@@ -946,12 +1000,16 @@ summary_obj <- list(
   output_features_midnight_only = midnight_only_count,
   coverage_status = coverage_status,
   coverage_note = coverage_note,
+  min_latest_rows_to_publish = min_latest_rows_to_publish,
+  allow_degraded_publish = allow_degraded_publish,
   max_obs_age_hours = if (latest_count > 0) max(latest_tbl$obs_age_hours[!is.na(latest_tbl$obs_age_hours)], na.rm = TRUE) else NA_real_,
   stale_12h_count = sum(latest_tbl$obs_stale_12h, na.rm = TRUE),
   stale_24h_count = sum(latest_tbl$obs_stale_24h, na.rm = TRUE),
-  cnrfc_inflow_ids_detected = length(cnrfc_inflow_ids),
-  cnrfc_ensemble_ids_detected = length(cnrfc_ensemble_ids),
-  cnrfc_release_ids_detected = length(cnrfc_release_ids),
+  cnrfc_availability_csv = cnrfc_availability_csv,
+  cnrfc_availability_rows = nrow(cnrfc_availability_tbl),
+  cnrfc_inflow_ids_available = sum(cnrfc_availability_tbl$has_cnrfc_inflow, na.rm = TRUE),
+  cnrfc_ensemble_ids_available = sum(cnrfc_availability_tbl$has_cnrfc_ensemble, na.rm = TRUE),
+  cnrfc_release_ids_available = sum(cnrfc_availability_tbl$has_cnrfc_release, na.rm = TRUE),
   output_features_with_cnrfc_obs = sum(!is.na(latest_tbl$cnrfc_obs_url), na.rm = TRUE),
   output_features_with_cnrfc_inflow = sum(latest_tbl$has_cnrfc_inflow, na.rm = TRUE),
   output_features_with_cnrfc_ensemble = sum(latest_tbl$has_cnrfc_ensemble, na.rm = TRUE),
@@ -989,12 +1047,15 @@ message("Midnight storage features: ", summary_obj$output_features_with_midnight
 message("Midnight-only features: ", summary_obj$output_features_midnight_only)
 message("Coverage status: ", summary_obj$coverage_status)
 message("Coverage note: ", summary_obj$coverage_note)
+message("Minimum latest rows to publish: ", summary_obj$min_latest_rows_to_publish)
+message("Allow degraded publish: ", summary_obj$allow_degraded_publish)
 message("Max obs age hours: ", round(summary_obj$max_obs_age_hours, 2))
 message("Stale >12h: ", summary_obj$stale_12h_count)
 message("Stale >24h: ", summary_obj$stale_24h_count)
-message("CNRFC inflow IDs detected: ", summary_obj$cnrfc_inflow_ids_detected)
-message("CNRFC ensemble IDs detected: ", summary_obj$cnrfc_ensemble_ids_detected)
-message("CNRFC release IDs detected: ", summary_obj$cnrfc_release_ids_detected)
+message("CNRFC availability rows: ", summary_obj$cnrfc_availability_rows)
+message("CNRFC inflow IDs available: ", summary_obj$cnrfc_inflow_ids_available)
+message("CNRFC ensemble IDs available: ", summary_obj$cnrfc_ensemble_ids_available)
+message("CNRFC release IDs available: ", summary_obj$cnrfc_release_ids_available)
 message("Features with CNRFC observed reservoir links: ", summary_obj$output_features_with_cnrfc_obs)
 message("Features with CNRFC inflow links: ", summary_obj$output_features_with_cnrfc_inflow)
 message("Features with CNRFC ensemble links: ", summary_obj$output_features_with_cnrfc_ensemble)
