@@ -24,6 +24,7 @@
 # STATIC INPUTS USED WHEN PRESENT:
 #   data/input/cnrfc_reservoir_product_availability.csv
 #   data/input/cnrfc_reservoir_role_overrides.csv
+#   data/input/cnrfc_reservoir_obs_availability_overrides.csv
 #   data/input/cdec_reservoir_capacity_overrides.csv
 #   data/input/usace_reservoir_plot_availability.csv
 #
@@ -77,6 +78,11 @@ cnrfc_availability_csv <- Sys.getenv(
 cnrfc_role_overrides_csv <- Sys.getenv(
   "CNRFC_RESERVOIR_ROLE_OVERRIDES_CSV",
   unset = "data/input/cnrfc_reservoir_role_overrides.csv"
+)
+
+cnrfc_obs_overrides_csv <- Sys.getenv(
+  "CNRFC_RESERVOIR_OBS_AVAILABILITY_OVERRIDES_CSV",
+  unset = "data/input/cnrfc_reservoir_obs_availability_overrides.csv"
 )
 
 capacity_overrides_csv <- Sys.getenv(
@@ -423,6 +429,80 @@ pt_bool <- function(x, default = FALSE) {
   out[missing] <- default
   out
 }
+
+pt_empty_cnrfc_obs_overrides <- function() {
+  tibble::tibble(
+    cnrfc_nws_id = character(),
+    cdec_id = character(),
+    has_cnrfc_obs = logical(),
+    cnrfc_obs_availability_note = character()
+  )
+}
+
+pt_read_cnrfc_obs_overrides <- function(path) {
+  ## Optional manually reviewed override table for CNRFC observed/current
+  ## reservoir pages.  The product-availability CSV confirms whether an ID
+  ## appears in CNRFC inflow/ensemble/release product lists, but obsRiver_hc.php
+  ## pages can exist for IDs that do not provide useful observed reservoir
+  ## storage.  This small override table lets BRIM suppress known misleading
+  ## "observed reservoir data" popup links without scraping all CNRFC observed
+  ## pages every scheduled feed build.
+  ##
+  ## Design choice:
+  ##   - Missing override row = preserve previous behavior and show the observed
+  ##     page when an effective CNRFC/NWS ID exists.
+  ##   - has_cnrfc_obs = FALSE = suppress observed/current reservoir link.
+  ##   - has_cnrfc_obs = TRUE  = explicitly verified/allowed.
+  if (!file.exists(path)) {
+    message("CNRFC observed-reservoir availability override CSV not found; preserving default observed-link behavior: ", path)
+    return(pt_empty_cnrfc_obs_overrides())
+  }
+
+  x <- readr::read_csv(
+    path,
+    show_col_types = FALSE,
+    col_types = readr::cols(.default = readr::col_character())
+  )
+
+  required_cols <- c("cnrfc_nws_id", "has_cnrfc_obs")
+  missing_cols <- setdiff(required_cols, names(x))
+
+  if (length(missing_cols) > 0) {
+    stop("CNRFC observed-reservoir override CSV is missing required column(s): ", paste(missing_cols, collapse = ", "))
+  }
+
+  if (!"cdec_id" %in% names(x)) {
+    x$cdec_id <- NA_character_
+  }
+
+  if (!"note" %in% names(x)) {
+    x$note <- NA_character_
+  }
+
+  out <- x |>
+    dplyr::mutate(
+      cnrfc_nws_id = toupper(pt_chr(.data$cnrfc_nws_id)),
+      cdec_id = toupper(pt_chr(.data$cdec_id)),
+      has_cnrfc_obs = pt_bool(.data$has_cnrfc_obs, default = FALSE),
+      cnrfc_obs_availability_note = pt_chr(.data$note)
+    ) |>
+    dplyr::filter(!is.na(.data$cnrfc_nws_id), .data$cnrfc_nws_id != "") |>
+    dplyr::select(
+      "cnrfc_nws_id",
+      "cdec_id",
+      "has_cnrfc_obs",
+      "cnrfc_obs_availability_note"
+    ) |>
+    dplyr::distinct(.data$cnrfc_nws_id, .keep_all = TRUE)
+
+  if (nrow(out) == 0) {
+    warning("CNRFC observed-reservoir override CSV produced zero usable rows; preserving default observed-link behavior.")
+    return(pt_empty_cnrfc_obs_overrides())
+  }
+
+  out
+}
+
 
 pt_default_usace_reservoir_plot_availability <- function(usace_url) {
   ## Static fallback from the USACE Sacramento District "Corps and Section 7
@@ -1009,10 +1089,24 @@ pt_lookup_cnrfc_availability <- function(ids, col) {
   cnrfc_availability_tbl[[col]][idx]
 }
 
+pt_lookup_cnrfc_obs_override <- function(ids, col) {
+  ids <- toupper(pt_chr(ids))
+
+  if (nrow(cnrfc_obs_overrides_tbl) == 0) {
+    out <- rep(NA, length(ids))
+    return(out)
+  }
+
+  idx <- match(ids, cnrfc_obs_overrides_tbl$cnrfc_nws_id)
+  cnrfc_obs_overrides_tbl[[col]][idx]
+}
+
 role_overrides_tbl <- pt_read_role_overrides(cnrfc_role_overrides_csv)
+cnrfc_obs_overrides_tbl <- pt_read_cnrfc_obs_overrides(cnrfc_obs_overrides_csv)
 capacity_overrides_tbl <- pt_read_capacity_overrides(capacity_overrides_csv)
 
 message("CNRFC role override rows read: ", nrow(role_overrides_tbl))
+message("CNRFC observed-reservoir override rows read: ", nrow(cnrfc_obs_overrides_tbl))
 message("CDEC capacity override rows read: ", nrow(capacity_overrides_tbl))
 
 usace_ca_lookup <- pt_read_usace_reservoir_plot_availability(
@@ -1062,10 +1156,23 @@ latest_tbl <- station_index |>
       pt_lookup_cnrfc_availability(.data$cnrfc_release_id_effective, "has_cnrfc_release"),
       FALSE
     ),
+    cnrfc_obs_override_has_obs = pt_lookup_cnrfc_obs_override(.data$cnrfc_obs_id_effective, "has_cnrfc_obs"),
+    has_cnrfc_obs = dplyr::coalesce(
+      .data$cnrfc_obs_override_has_obs,
+      !is.na(.data$cnrfc_obs_id_effective) & .data$cnrfc_obs_id_effective != ""
+    ),
+    cnrfc_obs_availability_note = pt_lookup_cnrfc_obs_override(
+      .data$cnrfc_obs_id_effective,
+      "cnrfc_obs_availability_note"
+    ),
     has_any_cnrfc_product = .data$has_cnrfc_inflow | .data$has_cnrfc_ensemble | .data$has_cnrfc_release,
     ## CNRFC reservoir-link conventions:
-    ##   - obsRiver_hc.php is the observed river/reservoir conditions page and
-    ##     can show reservoir elevation/storage detail for reservoir points.
+    ##   - obsRiver_hc.php is the observed river/reservoir conditions page.
+    ##     It is shown only when an effective observed/current ID exists and is
+    ##     not suppressed by the manually reviewed observed-reservoir override
+    ##     table.  Some CNRFC IDs, for example Spaulding/Fordyce hydropower-
+    ##     oriented pages, can have inflow/ensemble products without useful
+    ##     observed reservoir-storage content.
     ##   - reservoir.php is the deterministic reservoir-inflow / graphical RVF
     ##     page and is shown only when the prebuilt availability table says the
     ##     effective inflow ID is in the CNRFC reservoir-inflow product list.
@@ -1076,7 +1183,7 @@ latest_tbl <- station_index |>
     ##     shown only when the availability table says the effective release ID
     ##     is in the CNRFC reservoir-release product list.
     cnrfc_obs_url = dplyr::if_else(
-      !is.na(.data$cnrfc_obs_id_effective) & .data$cnrfc_obs_id_effective != "",
+      .data$has_cnrfc_obs,
       paste0("https://www.cnrfc.noaa.gov/obsRiver_hc.php?id=", .data$cnrfc_obs_id_effective),
       NA_character_
     ),
@@ -1219,10 +1326,12 @@ latest_tbl <- station_index |>
       "cnrfc_role_override_note",
       "cnrfc_match_confidence",
       "cnrfc_match_method",
+      "has_cnrfc_obs",
       "has_cnrfc_inflow",
       "has_cnrfc_ensemble",
       "has_cnrfc_release",
       "has_any_cnrfc_product",
+      "cnrfc_obs_availability_note",
       "cnrfc_obs_url",
       "cnrfc_inflow_url",
       "cnrfc_ensemble_url",
@@ -1335,7 +1444,7 @@ summary_obj <- list(
   cnrfc_inflow_ids_available = sum(cnrfc_availability_tbl$has_cnrfc_inflow, na.rm = TRUE),
   cnrfc_ensemble_ids_available = sum(cnrfc_availability_tbl$has_cnrfc_ensemble, na.rm = TRUE),
   cnrfc_release_ids_available = sum(cnrfc_availability_tbl$has_cnrfc_release, na.rm = TRUE),
-  output_features_with_cnrfc_obs = sum(!is.na(latest_tbl$cnrfc_obs_url), na.rm = TRUE),
+  output_features_with_cnrfc_obs = sum(latest_tbl$has_cnrfc_obs, na.rm = TRUE),
   output_features_with_cnrfc_inflow = sum(latest_tbl$has_cnrfc_inflow, na.rm = TRUE),
   output_features_with_cnrfc_ensemble = sum(latest_tbl$has_cnrfc_ensemble, na.rm = TRUE),
   output_features_with_cnrfc_release = sum(latest_tbl$has_cnrfc_release, na.rm = TRUE),
