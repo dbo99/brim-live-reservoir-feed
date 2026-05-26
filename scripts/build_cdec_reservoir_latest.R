@@ -21,6 +21,12 @@
 # REQUIRED INPUT:
 #   data/input/cdec_reservoir_station_index.csv
 #
+# STATIC INPUTS USED WHEN PRESENT:
+#   data/input/cnrfc_reservoir_product_availability.csv
+#   data/input/cnrfc_reservoir_role_overrides.csv
+#   data/input/cdec_reservoir_capacity_overrides.csv
+#   data/input/usace_reservoir_plot_availability.csv
+#
 # NOTES:
 #   CDEC's displayed reservoir table is provisional and subject to change.
 #   CDEC report times are parsed as Pacific local time using
@@ -76,6 +82,11 @@ cnrfc_role_overrides_csv <- Sys.getenv(
 capacity_overrides_csv <- Sys.getenv(
   "CDEC_RESERVOIR_CAPACITY_OVERRIDES_CSV",
   unset = "data/input/cdec_reservoir_capacity_overrides.csv"
+)
+
+usace_availability_csv <- Sys.getenv(
+  "USACE_RESERVOIR_PLOT_AVAILABILITY_CSV",
+  unset = "data/input/usace_reservoir_plot_availability.csv"
 )
 
 out_geojson <- Sys.getenv(
@@ -403,52 +414,134 @@ pt_fetch_cnrfc_product_ids <- function(url, label, known_ids) {
   ids
 }
 
-pt_usace_ca_reservoir_lookup <- function(usace_url) {
-  ## Static whitelist from the USACE Sacramento District "Corps and Section 7
-  ## Projects in California" plots page.  These are stable project/station IDs
-  ## used to show the generic USACE California plots page only where it is likely
-  ## to be useful.  The page itself is the authoritative destination and contains
-  ## the current plot/data links.
+pt_bool <- function(x, default = FALSE) {
+  ## Small local logical parser for manually curated CSV inputs.  It accepts the
+  ## usual TRUE/FALSE spellings and keeps missing values at the supplied default.
+  raw <- trimws(tolower(as.character(x)))
+  out <- raw %in% c("true", "t", "1", "yes", "y")
+  missing <- is.na(x) | raw == "" | raw %in% c("na", "null", "nan")
+  out[missing] <- default
+  out
+}
+
+pt_default_usace_reservoir_plot_availability <- function(usace_url) {
+  ## Static fallback from the USACE Sacramento District "Corps and Section 7
+  ## Projects in California" plots page.  The preferred source is the committed
+  ## CSV at data/input/usace_reservoir_plot_availability.csv so the list can be
+  ## reviewed/edited without touching this script.  This fallback preserves
+  ## useful behavior if the CSV is accidentally missing.
   tibble::tribble(
-    ~cdec_id, ~usace_project_display,
-    "SHA", "Shasta Dam & Lake Shasta",
-    "BLB", "Black Butte Dam & Lake",
-    "ORO", "Oroville Dam & Lake Oroville",
-    "BUL", "New Bullards Bar Dam & Lake",
-    "ENG", "Englebright Lake",
-    "INV", "Indian Valley Dam & Reservoir",
-    "FOL", "Folsom Dam & Lake",
-    "CMN", "Camanche Dam & Reservoir",
-    "NHG", "New Hogan Dam & Lake",
-    "FRM", "Farmington Dam & Reservoir",
-    "NML", "New Melones Dam & Lake",
-    "TUL", "Tulloch Dam & Reservoir",
-    "DNP", "Don Pedro Dam & Lake",
-    "EXC", "New Exchequer Dam / Lake McClure",
-    "LBN", "Los Banos Detention Reservoir",
-    "BUR", "Burns Dam & Reservoir",
-    "BAR", "Bear Dam & Reservoir",
-    "OWN", "Owens Dam & Reservoir",
-    "MAR", "Mariposa Dam & Reservoir",
-    "BUC", "Buchanan Dam / H.V. Eastman Lake",
-    "HID", "Hidden Dam / Hensley Lake",
-    "MIL", "Friant Dam / Millerton Lake",
-    "BDC", "Big Dry Creek Dam & Reservoir",
-    "PNF", "Pine Flat Dam & Lake",
-    "TRM", "Terminus Dam / Lake Kaweah",
-    "SCC", "Schafer Dam / Success Lake",
-    "ISB", "Isabella Dam & Lake Isabella",
-    "COY", "Coyote Valley Dam / Lake Mendocino",
-    "WRS", "Warm Springs Dam / Lake Sonoma",
-    "DLV", "Del Valle Dam & Reservoir",
-    "MRT", "Martis Creek Dam & Lake",
-    "PRS", "Prosser Creek Dam & Reservoir",
-    "STP", "Stampede Dam & Reservoir",
-    "BOC", "Boca Dam & Reservoir"
+    ~cdec_id, ~usace_plot_id, ~usace_project_display, ~usace_agency, ~usace_has_daily_plot, ~usace_has_hourly_plot, ~usace_plot_availability_note,
+    "SHA", "SHA", "Shasta Dam & Lake Shasta", "USBR", TRUE, FALSE, NA_character_,
+    "BLB", "BLB", "Black Butte Dam & Lake", "COE", TRUE, TRUE, NA_character_,
+    "ORO", "ORO", "Oroville Dam & Lake Oroville", "DWR", TRUE, FALSE, NA_character_,
+    "BUL", "BUL", "New Bullards Bar Dam & Lake", "YCWA", TRUE, FALSE, NA_character_,
+    "ENG", "ENG", "Englebright Lake", "COE", TRUE, TRUE, NA_character_,
+    "INV", "INV", "Indian Valley Dam & Reservoir", "YCFCWCA", TRUE, FALSE, NA_character_,
+    "FOL", "FOL", "Folsom Dam & Lake", "USBR", TRUE, TRUE, NA_character_,
+    "CMN", "CMN", "Camanche Dam & Reservoir", "EBMUD", TRUE, FALSE, NA_character_,
+    "NHG", "NHG", "New Hogan Dam & Lake", "COE", TRUE, TRUE, NA_character_,
+    "FRM", "FRM", "Farmington Dam & Reservoir", "COE", TRUE, TRUE, NA_character_,
+    "NML", "NML", "New Melones Dam & Lake", "USBR", TRUE, FALSE, NA_character_,
+    "TUL", "TUL", "Tulloch Dam & Reservoir", "USBR", TRUE, FALSE, NA_character_,
+    "DNP", "DNP", "Don Pedro Dam & Lake", "TID", TRUE, FALSE, NA_character_,
+    "EXC", "EXC", "New Exchequer Dam, Lake McClure", "MID", TRUE, FALSE, NA_character_,
+    "LBN", "LBN", "Los Banos Detention Reservoir", "DWR", TRUE, FALSE, NA_character_,
+    "LBS", "LBN", "Los Banos Detention Reservoir", "DWR", TRUE, FALSE, "Manual crosswalk: USACE plot ID LBN; BRIM/CDEC station index commonly uses LBS for Los Banos Dam.",
+    "BUR", "BUR", "Burns Dam & Reservoir", "COE", TRUE, TRUE, NA_character_,
+    "BAR", "BAR", "Bear Dam & Reservoir", "COE", TRUE, TRUE, NA_character_,
+    "OWN", "OWN", "Owens Dam & Reservoir", "COE", TRUE, TRUE, NA_character_,
+    "MAR", "MAR", "Mariposa Dam & Reservoir", "COE", TRUE, TRUE, NA_character_,
+    "BUC", "BUC", "Buchanan Dam / H.V. Eastman Lake", "COE", TRUE, TRUE, NA_character_,
+    "HID", "HID", "Hidden Dam / Hensley Lake", "COE", TRUE, TRUE, NA_character_,
+    "MIL", "MIL", "Friant Dam / Millerton Lake", "USBR", TRUE, FALSE, NA_character_,
+    "BDC", "BDC", "Big Dry Creek Dam & Reservoir", "FMFCD", TRUE, FALSE, NA_character_,
+    "PNF", "PNF", "Pine Flat Dam & Lake", "COE", TRUE, TRUE, NA_character_,
+    "TRM", "TRM", "Terminus Dam / Lake Kaweah", "COE", TRUE, TRUE, NA_character_,
+    "SCC", "SCC", "Schafer Dam / Success Lake", "COE", TRUE, TRUE, NA_character_,
+    "ISB", "ISB", "Isabella Dam & Lake Isabella", "COE", TRUE, TRUE, NA_character_,
+    "COY", "COY", "Coyote Valley Dam / Lake Mendocino", "COE", TRUE, TRUE, NA_character_,
+    "WRS", "WRS", "Warm Springs Dam / Lake Sonoma", "COE", TRUE, TRUE, NA_character_,
+    "DLV", "DLV", "Del Valle Dam & Reservoir", "DWR", TRUE, FALSE, NA_character_,
+    "MRT", "MRT", "Martis Creek Dam & Lake", "COE", TRUE, TRUE, NA_character_,
+    "PRS", "PRS", "Prosser Creek Dam & Reservoir", "USBR", TRUE, FALSE, NA_character_,
+    "STP", "STP", "Stampede Dam & Reservoir", "USBR", TRUE, FALSE, NA_character_,
+    "BOC", "BOC", "Boca Dam & Reservoir", "USBR", TRUE, FALSE, NA_character_
   ) |>
     dplyr::mutate(
       usace_california_plots_url = usace_url
     )
+}
+
+pt_empty_usace_reservoir_plot_availability <- function(usace_url) {
+  tibble::tibble(
+    cdec_id = character(),
+    usace_plot_id = character(),
+    usace_project_display = character(),
+    usace_agency = character(),
+    usace_has_daily_plot = logical(),
+    usace_has_hourly_plot = logical(),
+    usace_plot_availability_note = character(),
+    usace_california_plots_url = character()
+  )
+}
+
+pt_read_usace_reservoir_plot_availability <- function(path, usace_url) {
+  ## Read the curated static USACE plot-availability list.  This table is not
+  ## live-retrieved every feed build; it is committed input metadata that can be
+  ## refreshed manually if the USACE page changes.
+  if (!file.exists(path)) {
+    message("USACE reservoir plot-availability CSV not found; using script fallback: ", path)
+    return(pt_default_usace_reservoir_plot_availability(usace_url))
+  }
+
+  x <- readr::read_csv(
+    path,
+    show_col_types = FALSE,
+    col_types = readr::cols(.default = readr::col_character())
+  )
+
+  required_cols <- c("cdec_id", "usace_plot_id", "usace_project_display")
+  missing_cols <- setdiff(required_cols, names(x))
+
+  if (length(missing_cols) > 0) {
+    stop("USACE reservoir plot-availability CSV is missing required column(s): ", paste(missing_cols, collapse = ", "))
+  }
+
+  optional_cols <- c(
+    "usace_agency",
+    "usace_has_daily_plot",
+    "usace_has_hourly_plot",
+    "usace_plot_availability_note"
+  )
+
+  for (nm in optional_cols) {
+    if (!nm %in% names(x)) {
+      x[[nm]] <- NA_character_
+    }
+  }
+
+  out <- x |>
+    dplyr::mutate(
+      cdec_id = toupper(pt_chr(.data$cdec_id)),
+      usace_plot_id = toupper(pt_chr(.data$usace_plot_id)),
+      usace_project_display = pt_chr(.data$usace_project_display),
+      usace_agency = pt_chr(.data$usace_agency),
+      usace_has_daily_plot = pt_bool(.data$usace_has_daily_plot, default = TRUE),
+      usace_has_hourly_plot = pt_bool(.data$usace_has_hourly_plot, default = FALSE),
+      usace_plot_availability_note = pt_chr(.data$usace_plot_availability_note),
+      usace_california_plots_url = usace_url
+    ) |>
+    dplyr::filter(!is.na(.data$cdec_id), .data$cdec_id != "") |>
+    dplyr::filter(!is.na(.data$usace_plot_id), .data$usace_plot_id != "") |>
+    dplyr::distinct(.data$cdec_id, .keep_all = TRUE)
+
+  if (nrow(out) == 0) {
+    warning("USACE reservoir plot-availability CSV produced zero usable rows; continuing without USACE plot links.")
+    return(pt_empty_usace_reservoir_plot_availability(usace_url))
+  }
+
+  out
 }
 
 pt_html_to_lines <- function(html) {
@@ -922,7 +1015,14 @@ capacity_overrides_tbl <- pt_read_capacity_overrides(capacity_overrides_csv)
 message("CNRFC role override rows read: ", nrow(role_overrides_tbl))
 message("CDEC capacity override rows read: ", nrow(capacity_overrides_tbl))
 
-usace_ca_lookup <- pt_usace_ca_reservoir_lookup(usace_ca_plots_url)
+usace_ca_lookup <- pt_read_usace_reservoir_plot_availability(
+  path = usace_availability_csv,
+  usace_url = usace_ca_plots_url
+)
+
+message("USACE reservoir plot-availability rows read: ", nrow(usace_ca_lookup))
+message("USACE reservoir plot-availability hourly IDs: ", sum(usace_ca_lookup$usace_has_hourly_plot, na.rm = TRUE))
+message("USACE reservoir plot-availability daily IDs: ", sum(usace_ca_lookup$usace_has_daily_plot, na.rm = TRUE))
 
 # ---- 6. Join storage to station index --------------------------------------
 
@@ -933,15 +1033,19 @@ latest_tbl <- station_index |>
   dplyr::left_join(role_overrides_tbl, by = "cdec_id") |>
   dplyr::left_join(capacity_overrides_tbl, by = "cdec_id") |>
   dplyr::left_join(usace_ca_lookup, by = "cdec_id") |>
-  dplyr::filter(!is.na(.data$storage_af) | !is.na(.data$midnight_storage_af)) |>
   dplyr::mutate(
     storage_maf = .data$storage_af / 1e6,
     midnight_storage_maf = .data$midnight_storage_af / 1e6,
     display_storage_af = dplyr::coalesce(.data$storage_af, .data$midnight_storage_af),
     display_storage_maf = .data$display_storage_af / 1e6,
-    display_storage_source = dplyr::if_else(!is.na(.data$storage_af), "latest", "midnight_daily"),
     has_latest_storage = !is.na(.data$storage_af),
     has_midnight_storage = !is.na(.data$midnight_storage_af),
+    has_storage_value = .data$has_latest_storage | .data$has_midnight_storage,
+    display_storage_source = dplyr::case_when(
+      .data$has_latest_storage ~ "latest",
+      .data$has_midnight_storage ~ "midnight_daily",
+      TRUE ~ "no_current_storage"
+    ),
     cnrfc_obs_id_effective = dplyr::coalesce(.data$cnrfc_obs_id_override, .data$cnrfc_nws_id),
     cnrfc_inflow_id_effective = dplyr::coalesce(.data$cnrfc_inflow_id_override, .data$cnrfc_nws_id),
     cnrfc_ensemble_id_effective = dplyr::coalesce(.data$cnrfc_ensemble_id_override, .data$cnrfc_nws_id),
@@ -958,6 +1062,7 @@ latest_tbl <- station_index |>
       pt_lookup_cnrfc_availability(.data$cnrfc_release_id_effective, "has_cnrfc_release"),
       FALSE
     ),
+    has_any_cnrfc_product = .data$has_cnrfc_inflow | .data$has_cnrfc_ensemble | .data$has_cnrfc_release,
     ## CNRFC reservoir-link conventions:
     ##   - obsRiver_hc.php is the observed river/reservoir conditions page and
     ##     can show reservoir elevation/storage detail for reservoir points.
@@ -1038,6 +1143,8 @@ latest_tbl <- station_index |>
     obs_stale_12h = !is.na(.data$obs_age_hours) & .data$obs_age_hours > 12,
     obs_stale_24h = !is.na(.data$obs_age_hours) & .data$obs_age_hours > 24,
     data_quality_note_live = dplyr::case_when(
+      !.data$has_storage_value & .data$has_any_cnrfc_product ~
+        "No current CDEC storage value is available from the fetched latest or daily tables; feature is shown because CNRFC reservoir products are available.",
       !.data$has_latest_storage & .data$has_midnight_storage ~
         "Latest CDEC sensor-15 storage is not present; feature is shown using CDEC RES daily midnight storage.",
       .data$obs_stale_24h ~
@@ -1048,6 +1155,7 @@ latest_tbl <- station_index |>
         "CDEC provisional latest storage observation."
     )
   ) |>
+  dplyr::filter(.data$has_storage_value | .data$has_any_cnrfc_product) |>
   dplyr::select(
     dplyr::any_of(c(
       "cdec_id",
@@ -1061,6 +1169,7 @@ latest_tbl <- station_index |>
       "display_storage_source",
       "has_latest_storage",
       "has_midnight_storage",
+      "has_storage_value",
       "capacity_af",
       "capacity_source_display",
       "capacity_source_name",
@@ -1113,11 +1222,17 @@ latest_tbl <- station_index |>
       "has_cnrfc_inflow",
       "has_cnrfc_ensemble",
       "has_cnrfc_release",
+      "has_any_cnrfc_product",
       "cnrfc_obs_url",
       "cnrfc_inflow_url",
       "cnrfc_ensemble_url",
       "cnrfc_release_url",
       "usace_project_display",
+      "usace_agency",
+      "usace_plot_id",
+      "usace_has_daily_plot",
+      "usace_has_hourly_plot",
+      "usace_plot_availability_note",
       "usace_california_plots_url",
       "alias_names",
       "feed_build_time_utc",
@@ -1127,11 +1242,12 @@ latest_tbl <- station_index |>
       "data_quality_note_live"
     ))
   ) |>
-  dplyr::arrange(dplyr::desc(.data$display_storage_af), .data$cdec_id)
+  dplyr::arrange(dplyr::desc(.data$has_storage_value), dplyr::desc(.data$display_storage_af), .data$cdec_id)
 
 latest_count <- sum(!is.na(latest_tbl$storage_af))
 midnight_count <- sum(!is.na(latest_tbl$midnight_storage_af))
 midnight_only_count <- sum(is.na(latest_tbl$storage_af) & !is.na(latest_tbl$midnight_storage_af))
+no_current_storage_count <- sum(!latest_tbl$has_storage_value & latest_tbl$has_any_cnrfc_product, na.rm = TRUE)
 
 coverage_status <- dplyr::case_when(
   latest_count == 0 && midnight_count > 0 ~ "daily_fallback_only",
@@ -1199,6 +1315,7 @@ summary_obj <- list(
   output_features_with_latest_storage = latest_count,
   output_features_with_midnight_storage = midnight_count,
   output_features_midnight_only = midnight_only_count,
+  output_features_no_current_storage_cnrfc_only = no_current_storage_count,
   coverage_status = coverage_status,
   coverage_note = coverage_note,
   min_latest_rows_to_publish = min_latest_rows_to_publish,
@@ -1253,6 +1370,7 @@ message("Summary:  ", out_summary)
 message("Latest storage features: ", summary_obj$output_features_with_latest_storage)
 message("Midnight storage features: ", summary_obj$output_features_with_midnight_storage)
 message("Midnight-only features: ", summary_obj$output_features_midnight_only)
+message("No-current-storage CNRFC-only features: ", summary_obj$output_features_no_current_storage_cnrfc_only)
 message("Coverage status: ", summary_obj$coverage_status)
 message("Coverage note: ", summary_obj$coverage_note)
 message("Minimum latest rows to publish: ", summary_obj$min_latest_rows_to_publish)
