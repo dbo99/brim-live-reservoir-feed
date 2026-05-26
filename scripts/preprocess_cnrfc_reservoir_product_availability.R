@@ -61,6 +61,11 @@ out_summary <- Sys.getenv(
   unset = "data/input/cnrfc_reservoir_product_availability_summary.json"
 )
 
+cnrfc_role_overrides_csv <- Sys.getenv(
+  "CNRFC_RESERVOIR_ROLE_OVERRIDES_CSV",
+  unset = "data/input/cnrfc_reservoir_role_overrides.csv"
+)
+
 cnrfc_inflow_list_url <- Sys.getenv(
   "CNRFC_RSVR_INFLOW_LIST_URL",
   unset = "https://www.cnrfc.noaa.gov/reservoir.php?id=ANTC1"
@@ -89,6 +94,70 @@ pt_chr <- function(x) {
   x <- trimws(x)
   x[x == "" | is.na(x) | toupper(x) %in% c("NA", "NULL", "NAN")] <- NA_character_
   x
+}
+
+pt_empty_role_overrides <- function() {
+  tibble::tibble(
+    cdec_id = character(),
+    cnrfc_obs_id = character(),
+    cnrfc_inflow_id = character(),
+    cnrfc_ensemble_id = character(),
+    cnrfc_release_id = character(),
+    note = character()
+  )
+}
+
+pt_read_role_overrides <- function(path) {
+  if (!file.exists(path)) {
+    message("CNRFC role-override CSV not found; continuing without role-specific overrides: ", path)
+    return(pt_empty_role_overrides())
+  }
+
+  x <- readr::read_csv(
+    path,
+    show_col_types = FALSE,
+    col_types = readr::cols(.default = readr::col_character())
+  )
+
+  required_cols <- c("cdec_id", "cnrfc_obs_id", "cnrfc_inflow_id", "cnrfc_ensemble_id", "cnrfc_release_id")
+  missing_cols <- setdiff(required_cols, names(x))
+
+  if (length(missing_cols) > 0) {
+    stop("CNRFC role-override CSV is missing required column(s): ", paste(missing_cols, collapse = ", "))
+  }
+
+  if (!"note" %in% names(x)) {
+    x$note <- NA_character_
+  }
+
+  x |>
+    dplyr::mutate(
+      cdec_id = toupper(pt_chr(.data$cdec_id)),
+      cnrfc_obs_id = toupper(pt_chr(.data$cnrfc_obs_id)),
+      cnrfc_inflow_id = toupper(pt_chr(.data$cnrfc_inflow_id)),
+      cnrfc_ensemble_id = toupper(pt_chr(.data$cnrfc_ensemble_id)),
+      cnrfc_release_id = toupper(pt_chr(.data$cnrfc_release_id)),
+      note = as.character(.data$note)
+    ) |>
+    dplyr::filter(!is.na(.data$cdec_id), .data$cdec_id != "")
+}
+
+pt_role_overrides_long <- function(role_overrides) {
+  if (nrow(role_overrides) == 0) {
+    return(tibble::tibble(cdec_id = character(), cnrfc_nws_id = character()))
+  }
+
+  tibble::tibble(
+    cdec_id = rep(role_overrides$cdec_id, 4),
+    cnrfc_nws_id = c(
+      role_overrides$cnrfc_obs_id,
+      role_overrides$cnrfc_inflow_id,
+      role_overrides$cnrfc_ensemble_id,
+      role_overrides$cnrfc_release_id
+    )
+  ) |>
+    dplyr::filter(!is.na(.data$cnrfc_nws_id), .data$cnrfc_nws_id != "") |>
+    dplyr::distinct()
 }
 
 pt_force_utf8 <- function(x) {
@@ -258,15 +327,27 @@ station_xwalk <- station_index_raw |>
   ) |>
   dplyr::filter(!is.na(.data$cnrfc_nws_id), .data$cnrfc_nws_id != "")
 
-known_cnrfc_ids <- sort(unique(station_xwalk$cnrfc_nws_id))
+role_overrides <- pt_read_role_overrides(cnrfc_role_overrides_csv)
+role_overrides_long <- pt_role_overrides_long(role_overrides)
 
-message("Known CNRFC/NWS IDs from BRIM station index: ", length(known_cnrfc_ids))
+known_cnrfc_ids <- sort(unique(c(
+  station_xwalk$cnrfc_nws_id,
+  role_overrides_long$cnrfc_nws_id
+)))
+
+message("Known CNRFC/NWS IDs from BRIM station index: ", length(unique(station_xwalk$cnrfc_nws_id)))
+message("Additional CNRFC/NWS IDs from role overrides: ", length(setdiff(role_overrides_long$cnrfc_nws_id, station_xwalk$cnrfc_nws_id)))
+message("Total known CNRFC/NWS IDs for product scan: ", length(known_cnrfc_ids))
 
 if (length(known_cnrfc_ids) == 0) {
-  stop("No CNRFC/NWS IDs found in station index; cannot build availability table.")
+  stop("No CNRFC/NWS IDs found in station index or overrides; cannot build availability table.")
 }
 
-cdec_id_lookup <- station_xwalk |>
+cdec_id_lookup <- dplyr::bind_rows(
+  station_xwalk |> dplyr::select("cdec_id", "cnrfc_nws_id"),
+  role_overrides_long
+) |>
+  dplyr::filter(!is.na(.data$cnrfc_nws_id), .data$cnrfc_nws_id != "") |>
   dplyr::group_by(.data$cnrfc_nws_id) |>
   dplyr::summarise(
     cdec_ids = paste(sort(unique(.data$cdec_id[!is.na(.data$cdec_id)])), collapse = ";"),
@@ -326,6 +407,9 @@ summary_obj <- list(
   station_index_csv = station_index_csv,
   output_csv = out_csv,
   known_cnrfc_ids = length(known_cnrfc_ids),
+  role_override_csv = cnrfc_role_overrides_csv,
+  role_override_rows = nrow(role_overrides),
+  role_override_ids = nrow(role_overrides_long),
   inflow_source = cnrfc_inflow_list_url,
   ensemble_source = cnrfc_ensemble_list_url,
   release_source = cnrfc_release_list_url,

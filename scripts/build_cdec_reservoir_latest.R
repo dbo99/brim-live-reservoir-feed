@@ -68,6 +68,11 @@ cnrfc_availability_csv <- Sys.getenv(
   unset = "data/input/cnrfc_reservoir_product_availability.csv"
 )
 
+cnrfc_role_overrides_csv <- Sys.getenv(
+  "CNRFC_RESERVOIR_ROLE_OVERRIDES_CSV",
+  unset = "data/input/cnrfc_reservoir_role_overrides.csv"
+)
+
 out_geojson <- Sys.getenv(
   "CDEC_RESERVOIR_GEOJSON",
   unset = "docs/data/cdec_reservoir_latest.geojson"
@@ -120,6 +125,61 @@ pt_chr <- function(x) {
   x <- trimws(x)
   x[x == "" | is.na(x) | toupper(x) %in% c("NA", "NULL", "NAN")] <- NA_character_
   x
+}
+
+pt_empty_role_overrides <- function() {
+  tibble::tibble(
+    cdec_id = character(),
+    cnrfc_obs_id_override = character(),
+    cnrfc_inflow_id_override = character(),
+    cnrfc_ensemble_id_override = character(),
+    cnrfc_release_id_override = character(),
+    cnrfc_role_override_note = character()
+  )
+}
+
+pt_read_role_overrides <- function(path) {
+  if (!file.exists(path)) {
+    message("CNRFC role-override CSV not found; continuing without role-specific overrides: ", path)
+    return(pt_empty_role_overrides())
+  }
+
+  x <- readr::read_csv(
+    path,
+    show_col_types = FALSE,
+    col_types = readr::cols(.default = readr::col_character())
+  )
+
+  required_cols <- c("cdec_id", "cnrfc_obs_id", "cnrfc_inflow_id", "cnrfc_ensemble_id", "cnrfc_release_id")
+  missing_cols <- setdiff(required_cols, names(x))
+
+  if (length(missing_cols) > 0) {
+    stop("CNRFC role-override CSV is missing required column(s): ", paste(missing_cols, collapse = ", "))
+  }
+
+  if (!"note" %in% names(x)) {
+    x$note <- NA_character_
+  }
+
+  x |>
+    dplyr::mutate(
+      cdec_id = toupper(pt_chr(.data$cdec_id)),
+      cnrfc_obs_id_override = toupper(pt_chr(.data$cnrfc_obs_id)),
+      cnrfc_inflow_id_override = toupper(pt_chr(.data$cnrfc_inflow_id)),
+      cnrfc_ensemble_id_override = toupper(pt_chr(.data$cnrfc_ensemble_id)),
+      cnrfc_release_id_override = toupper(pt_chr(.data$cnrfc_release_id)),
+      cnrfc_role_override_note = as.character(.data$note)
+    ) |>
+    dplyr::filter(!is.na(.data$cdec_id), .data$cdec_id != "") |>
+    dplyr::select(
+      "cdec_id",
+      "cnrfc_obs_id_override",
+      "cnrfc_inflow_id_override",
+      "cnrfc_ensemble_id_override",
+      "cnrfc_release_id_override",
+      "cnrfc_role_override_note"
+    ) |>
+    dplyr::distinct(.data$cdec_id, .keep_all = TRUE)
 }
 
 pt_num <- function(x) {
@@ -775,6 +835,16 @@ message("CNRFC availability inflow IDs: ", sum(cnrfc_availability_tbl$has_cnrfc_
 message("CNRFC availability ensemble IDs: ", sum(cnrfc_availability_tbl$has_cnrfc_ensemble, na.rm = TRUE))
 message("CNRFC availability release IDs: ", sum(cnrfc_availability_tbl$has_cnrfc_release, na.rm = TRUE))
 
+pt_lookup_cnrfc_availability <- function(ids, col) {
+  ids <- toupper(pt_chr(ids))
+  idx <- match(ids, cnrfc_availability_tbl$cnrfc_nws_id)
+  cnrfc_availability_tbl[[col]][idx]
+}
+
+role_overrides_tbl <- pt_read_role_overrides(cnrfc_role_overrides_csv)
+
+message("CNRFC role override rows read: ", nrow(role_overrides_tbl))
+
 usace_ca_lookup <- pt_usace_ca_reservoir_lookup(usace_ca_plots_url)
 
 # ---- 6. Join storage to station index --------------------------------------
@@ -783,6 +853,7 @@ latest_tbl <- station_index |>
   dplyr::left_join(storage_tbl, by = "cdec_id") |>
   dplyr::left_join(midnight_tbl, by = "cdec_id") |>
   dplyr::left_join(cnrfc_availability_tbl, by = "cnrfc_nws_id") |>
+  dplyr::left_join(role_overrides_tbl, by = "cdec_id") |>
   dplyr::left_join(usace_ca_lookup, by = "cdec_id") |>
   dplyr::filter(!is.na(.data$storage_af) | !is.na(.data$midnight_storage_af)) |>
   dplyr::mutate(
@@ -793,32 +864,63 @@ latest_tbl <- station_index |>
     display_storage_source = dplyr::if_else(!is.na(.data$storage_af), "latest", "midnight_daily"),
     has_latest_storage = !is.na(.data$storage_af),
     has_midnight_storage = !is.na(.data$midnight_storage_af),
-    has_cnrfc_inflow = dplyr::coalesce(.data$has_cnrfc_inflow, FALSE),
-    has_cnrfc_ensemble = dplyr::coalesce(.data$has_cnrfc_ensemble, FALSE),
-    has_cnrfc_release = dplyr::coalesce(.data$has_cnrfc_release, FALSE),
+    cnrfc_obs_id_effective = dplyr::coalesce(.data$cnrfc_obs_id_override, .data$cnrfc_nws_id),
+    cnrfc_inflow_id_effective = dplyr::coalesce(.data$cnrfc_inflow_id_override, .data$cnrfc_nws_id),
+    cnrfc_ensemble_id_effective = dplyr::coalesce(.data$cnrfc_ensemble_id_override, .data$cnrfc_nws_id),
+    cnrfc_release_id_effective = dplyr::coalesce(.data$cnrfc_release_id_override, .data$cnrfc_nws_id),
+    has_cnrfc_inflow = dplyr::coalesce(
+      pt_lookup_cnrfc_availability(.data$cnrfc_inflow_id_effective, "has_cnrfc_inflow"),
+      FALSE
+    ),
+    has_cnrfc_ensemble = dplyr::coalesce(
+      pt_lookup_cnrfc_availability(.data$cnrfc_ensemble_id_effective, "has_cnrfc_ensemble"),
+      FALSE
+    ),
+    has_cnrfc_release = dplyr::coalesce(
+      pt_lookup_cnrfc_availability(.data$cnrfc_release_id_effective, "has_cnrfc_release"),
+      FALSE
+    ),
     ## CNRFC reservoir-link conventions:
     ##   - obsRiver_hc.php is the observed river/reservoir conditions page and
     ##     can show reservoir elevation/storage detail for reservoir points.
     ##   - reservoir.php is the deterministic reservoir-inflow / graphical RVF
     ##     page and is shown only when the prebuilt availability table says the
-    ##     ID is in the CNRFC reservoir-inflow product list.
+    ##     effective inflow ID is in the CNRFC reservoir-inflow product list.
     ##   - ensembleProduct.php?prodID=3 is the HEFS/ensemble forecast page and
-    ##     is shown only when the availability table says the ID is in the CNRFC
-    ##     ensemble product list.
+    ##     is shown only when the availability table says the effective ensemble
+    ##     ID is in the CNRFC ensemble product list.
     ##   - reservoirRelease.php is the reservoir-release schedule page and is
-    ##     shown only when the availability table says the ID is in the CNRFC
-    ##     reservoir-release product list.
-    cnrfc_obs_url = dplyr::coalesce(
-      .data$cnrfc_obs_url,
-      dplyr::if_else(
-        !is.na(.data$cnrfc_nws_id) & .data$cnrfc_nws_id != "",
-        paste0("https://www.cnrfc.noaa.gov/obsRiver_hc.php?id=", .data$cnrfc_nws_id),
-        NA_character_
-      )
+    ##     shown only when the availability table says the effective release ID
+    ##     is in the CNRFC reservoir-release product list.
+    cnrfc_obs_url = dplyr::if_else(
+      !is.na(.data$cnrfc_obs_id_effective) & .data$cnrfc_obs_id_effective != "",
+      paste0("https://www.cnrfc.noaa.gov/obsRiver_hc.php?id=", .data$cnrfc_obs_id_effective),
+      NA_character_
     ),
-    cnrfc_inflow_url = dplyr::if_else(.data$has_cnrfc_inflow, .data$cnrfc_inflow_url, NA_character_),
-    cnrfc_ensemble_url = dplyr::if_else(.data$has_cnrfc_ensemble, .data$cnrfc_ensemble_url, NA_character_),
-    cnrfc_release_url = dplyr::if_else(.data$has_cnrfc_release, .data$cnrfc_release_url, NA_character_),
+    cnrfc_inflow_url = dplyr::if_else(
+      .data$has_cnrfc_inflow,
+      dplyr::coalesce(
+        pt_lookup_cnrfc_availability(.data$cnrfc_inflow_id_effective, "cnrfc_inflow_url"),
+        paste0("https://www.cnrfc.noaa.gov/reservoir.php?id=", .data$cnrfc_inflow_id_effective)
+      ),
+      NA_character_
+    ),
+    cnrfc_ensemble_url = dplyr::if_else(
+      .data$has_cnrfc_ensemble,
+      dplyr::coalesce(
+        pt_lookup_cnrfc_availability(.data$cnrfc_ensemble_id_effective, "cnrfc_ensemble_url"),
+        paste0("https://www.cnrfc.noaa.gov/ensembleProduct.php?id=", .data$cnrfc_ensemble_id_effective, "&prodID=3")
+      ),
+      NA_character_
+    ),
+    cnrfc_release_url = dplyr::if_else(
+      .data$has_cnrfc_release,
+      dplyr::coalesce(
+        pt_lookup_cnrfc_availability(.data$cnrfc_release_id_effective, "cnrfc_release_url"),
+        paste0("https://www.cnrfc.noaa.gov/reservoirRelease.php?id=", .data$cnrfc_release_id_effective)
+      ),
+      NA_character_
+    ),
     ## CDEC labels many service times as PST, but the latest-storage web table
     ## displays Pacific clock time.  Use America/Los_Angeles so daylight-saving
     ## dates are not shifted one hour into the future.
@@ -907,6 +1009,11 @@ latest_tbl <- station_index |>
       "cdec_latest_storage_table_url",
       "nws_id",
       "cnrfc_nws_id",
+      "cnrfc_obs_id_effective",
+      "cnrfc_inflow_id_effective",
+      "cnrfc_ensemble_id_effective",
+      "cnrfc_release_id_effective",
+      "cnrfc_role_override_note",
       "cnrfc_match_confidence",
       "cnrfc_match_method",
       "has_cnrfc_inflow",
@@ -1007,6 +1114,9 @@ summary_obj <- list(
   stale_24h_count = sum(latest_tbl$obs_stale_24h, na.rm = TRUE),
   cnrfc_availability_csv = cnrfc_availability_csv,
   cnrfc_availability_rows = nrow(cnrfc_availability_tbl),
+  cnrfc_role_override_csv = cnrfc_role_overrides_csv,
+  cnrfc_role_override_rows = nrow(role_overrides_tbl),
+  output_features_with_cnrfc_role_override = sum(!is.na(latest_tbl$cnrfc_role_override_note) & latest_tbl$cnrfc_role_override_note != "", na.rm = TRUE),
   cnrfc_inflow_ids_available = sum(cnrfc_availability_tbl$has_cnrfc_inflow, na.rm = TRUE),
   cnrfc_ensemble_ids_available = sum(cnrfc_availability_tbl$has_cnrfc_ensemble, na.rm = TRUE),
   cnrfc_release_ids_available = sum(cnrfc_availability_tbl$has_cnrfc_release, na.rm = TRUE),
@@ -1053,6 +1163,8 @@ message("Max obs age hours: ", round(summary_obj$max_obs_age_hours, 2))
 message("Stale >12h: ", summary_obj$stale_12h_count)
 message("Stale >24h: ", summary_obj$stale_24h_count)
 message("CNRFC availability rows: ", summary_obj$cnrfc_availability_rows)
+message("CNRFC role override rows: ", summary_obj$cnrfc_role_override_rows)
+message("Features using CNRFC role overrides: ", summary_obj$output_features_with_cnrfc_role_override)
 message("CNRFC inflow IDs available: ", summary_obj$cnrfc_inflow_ids_available)
 message("CNRFC ensemble IDs available: ", summary_obj$cnrfc_ensemble_ids_available)
 message("CNRFC release IDs available: ", summary_obj$cnrfc_release_ids_available)
