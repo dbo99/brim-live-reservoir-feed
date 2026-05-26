@@ -1,0 +1,10 @@
+Patch 47b capacity override update
+
+Adds/updates 18 remaining current-feed capacity override records on top of Patch 47a.
+
+Total override rows: 36
+New IDs: ENB, SLB, UTI, SPC, JNC, BHC, RBL, BIL, MRT, GLL, CMI, FRM, MAR, RPF, BUR, BAR, ECO, OWN
+
+Notes:
+- Several smaller flood-control/debris/regulating reservoirs use medium-confidence values because public sources differ on normal, gross, flood-control, or design storage.
+- This table is static metadata for popup/percent-capacity display, not live retrieval.
