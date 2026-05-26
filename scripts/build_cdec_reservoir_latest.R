@@ -140,6 +140,29 @@ allow_degraded_publish <- tolower(Sys.getenv(
   unset = "false"
 )) %in% c("true", "1", "yes", "y")
 
+cnrfc_fallback_storage_enabled <- tolower(Sys.getenv(
+  "CNRFC_FALLBACK_STORAGE_ENABLED",
+  unset = "true"
+)) %in% c("true", "1", "yes", "y")
+
+cnrfc_fallback_max_requests <- suppressWarnings(as.integer(Sys.getenv(
+  "CNRFC_FALLBACK_MAX_REQUESTS",
+  unset = "75"
+)))
+
+if (is.na(cnrfc_fallback_max_requests) || cnrfc_fallback_max_requests < 0) {
+  cnrfc_fallback_max_requests <- 75L
+}
+
+cnrfc_fallback_request_pause_sec <- suppressWarnings(as.numeric(Sys.getenv(
+  "CNRFC_FALLBACK_REQUEST_PAUSE_SEC",
+  unset = "0.25"
+)))
+
+if (is.na(cnrfc_fallback_request_pause_sec) || cnrfc_fallback_request_pause_sec < 0) {
+  cnrfc_fallback_request_pause_sec <- 0.25
+}
+
 # ---- 3. Helpers -------------------------------------------------------------
 
 pt_chr <- function(x) {
@@ -501,6 +524,180 @@ pt_read_cnrfc_obs_overrides <- function(path) {
   }
 
   out
+}
+
+pt_empty_cnrfc_fallback_storage <- function() {
+  tibble::tibble(
+    cdec_id = character(),
+    cnrfc_obs_id_effective = character(),
+    cnrfc_fallback_storage_af = numeric(),
+    cnrfc_fallback_elevation_ft = numeric(),
+    cnrfc_fallback_pct_capacity = numeric(),
+    cnrfc_fallback_obs_datetime_display = character(),
+    cnrfc_fallback_obs_datetime_utc = character(),
+    cnrfc_fallback_obs_age_hours = numeric(),
+    cnrfc_fallback_source_url = character(),
+    cnrfc_fallback_status = character(),
+    cnrfc_fallback_note = character()
+  )
+}
+
+pt_parse_cnrfc_observed_storage <- function(html, cdec_id, cnrfc_id, source_url) {
+  ## Parse the top-of-page "Latest Observation" line from CNRFC observed
+  ## river/reservoir pages, for example:
+  ##   Latest Observation - 05/25/2026 at 1:30 AM PDT :
+  ##     573.26 Ft | 498,756 Ac-Ft | 96% Total Capacity
+  ##
+  ## This is intentionally used only as a fallback when CDEC latest and CDEC
+  ## RES daily storage are both missing, and only for IDs that RF006 allowed as
+  ## useful observed/current reservoir pages.  It is not a replacement for CDEC.
+  txt <- pt_strip_html(html)
+  txt <- gsub("\\s+", " ", txt)
+
+  pattern <- paste0(
+    "Latest\\s+Observation\\s*-\\s*",
+    "([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})\\s+at\\s+",
+    "([0-9]{1,2}:[0-9]{2}\\s+[AP]M)(?:\\s+(PST|PDT))?\\s*:\\s*",
+    "([0-9,.-]+)\\s*(?:Ft|Feet)\\s*\\|\\s*",
+    "([0-9,.-]+)\\s*(?:Ac-?Ft|AF)\\s*",
+    "(?:\\|\\s*([0-9,.-]+)\\s*%\\s*(?:Total\\s+)?Capacity)?"
+  )
+
+  m <- stringr::str_match(
+    txt,
+    stringr::regex(pattern, ignore_case = TRUE)
+  )
+
+  if (all(is.na(m))) {
+    return(pt_empty_cnrfc_fallback_storage())
+  }
+
+  dt_display <- paste0(
+    stringr::str_squish(m[, 2]),
+    " ",
+    stringr::str_squish(m[, 3]),
+    ifelse(!is.na(m[, 4]) & nzchar(m[, 4]), paste0(" ", m[, 4]), "")
+  )
+
+  ## Parse using America/Los_Angeles.  The PST/PDT abbreviation is preserved in
+  ## the display string but not needed for lubridate's local clock parse.
+  dt_for_parse <- paste(stringr::str_squish(m[, 2]), stringr::str_squish(m[, 3]))
+  dt_pacific <- suppressWarnings(lubridate::mdy_hm(dt_for_parse, tz = "America/Los_Angeles"))
+
+  storage_af <- pt_num(m[, 6])
+  elevation_ft <- pt_num(m[, 5])
+  pct_capacity <- pt_num(m[, 7])
+
+  if (is.na(storage_af)) {
+    return(pt_empty_cnrfc_fallback_storage())
+  }
+
+  tibble::tibble(
+    cdec_id = cdec_id,
+    cnrfc_obs_id_effective = cnrfc_id,
+    cnrfc_fallback_storage_af = storage_af,
+    cnrfc_fallback_elevation_ft = elevation_ft,
+    cnrfc_fallback_pct_capacity = pct_capacity,
+    cnrfc_fallback_obs_datetime_display = dt_display,
+    cnrfc_fallback_obs_datetime_utc = dplyr::if_else(
+      !is.na(dt_pacific),
+      format(lubridate::with_tz(dt_pacific, "UTC"), "%Y-%m-%dT%H:%M:%SZ"),
+      NA_character_
+    ),
+    cnrfc_fallback_obs_age_hours = dplyr::if_else(
+      !is.na(dt_pacific),
+      as.numeric(difftime(Sys.time(), dt_pacific, units = "hours")),
+      NA_real_
+    ),
+    cnrfc_fallback_source_url = source_url,
+    cnrfc_fallback_status = "CNRFC observed/current reservoir fallback storage available.",
+    cnrfc_fallback_note = "Used only because CDEC latest and CDEC RES daily storage were both missing for this feature."
+  )
+}
+
+pt_fetch_one_cnrfc_fallback_storage <- function(cdec_id, cnrfc_id, url) {
+  if (is.na(cnrfc_id) || !nzchar(cnrfc_id) || is.na(url) || !nzchar(url)) {
+    return(pt_empty_cnrfc_fallback_storage())
+  }
+
+  tryCatch({
+    html <- pt_fetch_text(
+      url,
+      label = paste0("CNRFC observed/current fallback ", cdec_id, "/", cnrfc_id),
+      timeout_sec = 30,
+      retries = 2
+    )
+    pt_parse_cnrfc_observed_storage(
+      html = html,
+      cdec_id = cdec_id,
+      cnrfc_id = cnrfc_id,
+      source_url = url
+    )
+  }, error = function(e) {
+    warning("Could not fetch/parse CNRFC fallback storage for ", cdec_id, "/", cnrfc_id, ": ", conditionMessage(e))
+    pt_empty_cnrfc_fallback_storage()
+  })
+}
+
+pt_fetch_cnrfc_fallback_storage_tbl <- function(candidates, max_requests = 75L, pause_sec = 0.25) {
+  if (!isTRUE(cnrfc_fallback_storage_enabled)) {
+    message("CNRFC fallback storage fetch disabled by CNRFC_FALLBACK_STORAGE_ENABLED=false.")
+    return(pt_empty_cnrfc_fallback_storage())
+  }
+
+  if (nrow(candidates) == 0) {
+    message("CNRFC fallback storage candidates: 0")
+    return(pt_empty_cnrfc_fallback_storage())
+  }
+
+  candidates <- candidates |>
+    dplyr::filter(!is.na(.data$cnrfc_obs_url), .data$cnrfc_obs_url != "") |>
+    dplyr::distinct(.data$cdec_id, .data$cnrfc_obs_id_effective, .data$cnrfc_obs_url, .keep_all = TRUE)
+
+  if (nrow(candidates) == 0) {
+    message("CNRFC fallback storage candidates with observed/current URL: 0")
+    return(pt_empty_cnrfc_fallback_storage())
+  }
+
+  if (max_requests == 0) {
+    message("CNRFC fallback storage max requests is 0; skipping fallback fetch.")
+    return(pt_empty_cnrfc_fallback_storage())
+  }
+
+  if (nrow(candidates) > max_requests) {
+    warning(
+      "CNRFC fallback storage candidates (", nrow(candidates),
+      ") exceed max requests (", max_requests, "). Fetching the first ", max_requests,
+      " only. Increase CNRFC_FALLBACK_MAX_REQUESTS if this is intentional."
+    )
+    candidates <- candidates |> dplyr::slice_head(n = max_requests)
+  }
+
+  message("CNRFC fallback storage candidates to fetch: ", nrow(candidates))
+
+  out <- vector("list", nrow(candidates))
+
+  for (i in seq_len(nrow(candidates))) {
+    out[[i]] <- pt_fetch_one_cnrfc_fallback_storage(
+      cdec_id = candidates$cdec_id[[i]],
+      cnrfc_id = candidates$cnrfc_obs_id_effective[[i]],
+      url = candidates$cnrfc_obs_url[[i]]
+    )
+
+    if (i < nrow(candidates) && pause_sec > 0) {
+      Sys.sleep(pause_sec)
+    }
+  }
+
+  out <- dplyr::bind_rows(out)
+
+  if (nrow(out) == 0) {
+    return(pt_empty_cnrfc_fallback_storage())
+  }
+
+  out |>
+    dplyr::filter(!is.na(.data$cdec_id), !is.na(.data$cnrfc_fallback_storage_af)) |>
+    dplyr::distinct(.data$cdec_id, .keep_all = TRUE)
 }
 
 
@@ -1118,6 +1315,53 @@ message("USACE reservoir plot-availability rows read: ", nrow(usace_ca_lookup))
 message("USACE reservoir plot-availability hourly IDs: ", sum(usace_ca_lookup$usace_has_hourly_plot, na.rm = TRUE))
 message("USACE reservoir plot-availability daily IDs: ", sum(usace_ca_lookup$usace_has_daily_plot, na.rm = TRUE))
 
+# ---- 5.2 Fetch CNRFC fallback storage for missing-CDEC observed reservoirs --
+#
+# RF007: If a reservoir has no CDEC latest storage and no CDEC RES daily
+# midnight storage, but RF006 says the CNRFC observed/current page is allowed,
+# fetch the CNRFC observed/current page as a selective fallback.  This keeps the
+# feed dynamic for the current distribution of CDEC gaps without scraping every
+# CNRFC reservoir page every scheduled build.
+
+cnrfc_fallback_candidates <- station_index |>
+  dplyr::left_join(storage_tbl, by = "cdec_id") |>
+  dplyr::left_join(midnight_tbl, by = "cdec_id") |>
+  dplyr::left_join(role_overrides_tbl, by = "cdec_id") |>
+  dplyr::mutate(
+    cnrfc_obs_id_effective = dplyr::coalesce(.data$cnrfc_obs_id_override, .data$cnrfc_nws_id),
+    cnrfc_obs_override_has_obs = pt_lookup_cnrfc_obs_override(.data$cnrfc_obs_id_effective, "has_cnrfc_obs"),
+    has_cnrfc_obs = dplyr::coalesce(
+      .data$cnrfc_obs_override_has_obs,
+      !is.na(.data$cnrfc_obs_id_effective) & .data$cnrfc_obs_id_effective != ""
+    ),
+    cnrfc_obs_url = dplyr::if_else(
+      .data$has_cnrfc_obs,
+      paste0("https://www.cnrfc.noaa.gov/obsRiver_hc.php?id=", .data$cnrfc_obs_id_effective),
+      NA_character_
+    )
+  ) |>
+  dplyr::filter(
+    is.na(.data$storage_af),
+    is.na(.data$midnight_storage_af),
+    .data$has_cnrfc_obs,
+    !is.na(.data$cnrfc_obs_url),
+    .data$cnrfc_obs_url != ""
+  ) |>
+  dplyr::select(
+    "cdec_id",
+    "reservoir_name",
+    "cnrfc_obs_id_effective",
+    "cnrfc_obs_url"
+  )
+
+cnrfc_fallback_storage_tbl <- pt_fetch_cnrfc_fallback_storage_tbl(
+  candidates = cnrfc_fallback_candidates,
+  max_requests = cnrfc_fallback_max_requests,
+  pause_sec = cnrfc_fallback_request_pause_sec
+)
+
+message("CNRFC fallback storage rows parsed: ", nrow(cnrfc_fallback_storage_tbl))
+
 # ---- 6. Join storage to station index --------------------------------------
 
 latest_tbl <- station_index |>
@@ -1127,17 +1371,29 @@ latest_tbl <- station_index |>
   dplyr::left_join(role_overrides_tbl, by = "cdec_id") |>
   dplyr::left_join(capacity_overrides_tbl, by = "cdec_id") |>
   dplyr::left_join(usace_ca_lookup, by = "cdec_id") |>
+  dplyr::left_join(
+    cnrfc_fallback_storage_tbl |>
+      dplyr::select(-dplyr::any_of("cnrfc_obs_id_effective")),
+    by = "cdec_id"
+  ) |>
   dplyr::mutate(
     storage_maf = .data$storage_af / 1e6,
     midnight_storage_maf = .data$midnight_storage_af / 1e6,
-    display_storage_af = dplyr::coalesce(.data$storage_af, .data$midnight_storage_af),
-    display_storage_maf = .data$display_storage_af / 1e6,
+    cnrfc_fallback_storage_maf = .data$cnrfc_fallback_storage_af / 1e6,
     has_latest_storage = !is.na(.data$storage_af),
     has_midnight_storage = !is.na(.data$midnight_storage_af),
-    has_storage_value = .data$has_latest_storage | .data$has_midnight_storage,
+    has_cnrfc_fallback_storage = !is.na(.data$cnrfc_fallback_storage_af),
+    display_storage_af = dplyr::coalesce(
+      .data$storage_af,
+      .data$midnight_storage_af,
+      .data$cnrfc_fallback_storage_af
+    ),
+    display_storage_maf = .data$display_storage_af / 1e6,
+    has_storage_value = .data$has_latest_storage | .data$has_midnight_storage | .data$has_cnrfc_fallback_storage,
     display_storage_source = dplyr::case_when(
-      .data$has_latest_storage ~ "latest",
-      .data$has_midnight_storage ~ "midnight_daily",
+      .data$has_latest_storage ~ "cdec_latest",
+      .data$has_midnight_storage ~ "cdec_midnight_daily",
+      .data$has_cnrfc_fallback_storage ~ "cnrfc_observed_fallback",
       TRUE ~ "no_current_storage"
     ),
     cnrfc_obs_id_effective = dplyr::coalesce(.data$cnrfc_obs_id_override, .data$cnrfc_nws_id),
@@ -1239,23 +1495,43 @@ latest_tbl <- station_index |>
       !is.na(.data$capacity_af) ~ "BRIM station index",
       TRUE ~ NA_character_
     ),
-    pct_capacity = dplyr::if_else(
-      !is.na(.data$capacity_af) & .data$capacity_af > 0 & !is.na(.data$storage_af),
-      100 * .data$storage_af / .data$capacity_af,
-      NA_real_
+    pct_capacity = dplyr::case_when(
+      !is.na(.data$capacity_af) & .data$capacity_af > 0 & !is.na(.data$storage_af) ~
+        100 * .data$storage_af / .data$capacity_af,
+      !is.na(.data$cnrfc_fallback_pct_capacity) ~
+        .data$cnrfc_fallback_pct_capacity,
+      !is.na(.data$capacity_af) & .data$capacity_af > 0 & !is.na(.data$cnrfc_fallback_storage_af) ~
+        100 * .data$cnrfc_fallback_storage_af / .data$capacity_af,
+      TRUE ~ NA_real_
+    ),
+    display_obs_age_hours = dplyr::coalesce(
+      .data$obs_age_hours,
+      .data$cnrfc_fallback_obs_age_hours
+    ),
+    display_obs_datetime_utc = dplyr::coalesce(
+      .data$obs_datetime_utc,
+      .data$cnrfc_fallback_obs_datetime_utc
+    ),
+    display_obs_datetime_source = dplyr::case_when(
+      .data$has_latest_storage ~ "CDEC latest sensor-15",
+      .data$has_cnrfc_fallback_storage ~ "CNRFC observed/current fallback",
+      .data$has_midnight_storage ~ "CDEC RES daily midnight",
+      TRUE ~ NA_character_
     ),
     feed_build_time_utc = feed_build_time_utc,
-    feed_source = "CDEC latest sensor-15 table with CDEC RES daily midnight context",
+    feed_source = "CDEC latest sensor-15 table with CDEC RES daily midnight context and selective CNRFC observed/current fallback",
     source_url = cdec_getall_url,
-    obs_stale_12h = !is.na(.data$obs_age_hours) & .data$obs_age_hours > 12,
-    obs_stale_24h = !is.na(.data$obs_age_hours) & .data$obs_age_hours > 24,
+    obs_stale_12h = !is.na(.data$display_obs_age_hours) & .data$display_obs_age_hours > 12,
+    obs_stale_24h = !is.na(.data$display_obs_age_hours) & .data$display_obs_age_hours > 24,
     data_quality_note_live = dplyr::case_when(
+      .data$has_cnrfc_fallback_storage ~
+        "CDEC latest and CDEC RES daily storage are not available; using CNRFC observed/current reservoir storage fallback.",
       !.data$has_storage_value & .data$has_any_cnrfc_product ~
-        "No current CDEC storage value is available from the fetched latest or daily tables; feature is shown because CNRFC reservoir products are available.",
+        "No current CDEC or CNRFC fallback storage value is available; feature is shown because CNRFC reservoir products are available.",
       !.data$has_latest_storage & .data$has_midnight_storage ~
         "Latest CDEC sensor-15 storage is not present; feature is shown using CDEC RES daily midnight storage.",
       .data$obs_stale_24h ~
-        "CDEC latest storage observation is older than 24 hours; review before use.",
+        "Displayed latest storage observation is older than 24 hours; review before use.",
       .data$obs_stale_12h ~
         "CDEC latest storage observation is older than 12 hours; use caution.",
       TRUE ~
@@ -1274,6 +1550,21 @@ latest_tbl <- station_index |>
       "display_storage_af",
       "display_storage_maf",
       "display_storage_source",
+      "has_latest_storage",
+      "has_cnrfc_fallback_storage",
+      "cnrfc_fallback_storage_af",
+      "cnrfc_fallback_storage_maf",
+      "cnrfc_fallback_elevation_ft",
+      "cnrfc_fallback_pct_capacity",
+      "cnrfc_fallback_obs_datetime_display",
+      "cnrfc_fallback_obs_datetime_utc",
+      "cnrfc_fallback_obs_age_hours",
+      "cnrfc_fallback_source_url",
+      "cnrfc_fallback_status",
+      "cnrfc_fallback_note",
+      "display_obs_age_hours",
+      "display_obs_datetime_utc",
+      "display_obs_datetime_source",
       "has_latest_storage",
       "has_midnight_storage",
       "has_storage_value",
@@ -1355,7 +1646,13 @@ latest_tbl <- station_index |>
 
 latest_count <- sum(!is.na(latest_tbl$storage_af))
 midnight_count <- sum(!is.na(latest_tbl$midnight_storage_af))
-midnight_only_count <- sum(is.na(latest_tbl$storage_af) & !is.na(latest_tbl$midnight_storage_af))
+cnrfc_fallback_count <- sum(latest_tbl$has_cnrfc_fallback_storage, na.rm = TRUE)
+midnight_only_count <- sum(
+  is.na(latest_tbl$storage_af) &
+    !is.na(latest_tbl$midnight_storage_af) &
+    !latest_tbl$has_cnrfc_fallback_storage,
+  na.rm = TRUE
+)
 no_current_storage_count <- sum(!latest_tbl$has_storage_value & latest_tbl$has_any_cnrfc_product, na.rm = TRUE)
 
 coverage_status <- dplyr::case_when(
@@ -1420,16 +1717,21 @@ summary_obj <- list(
   cdec_storage_rows_with_storage = sum(!is.na(storage_tbl$storage_af)),
   cdec_res_daily_rows_parsed = nrow(midnight_tbl),
   cdec_res_daily_rows_with_midnight_storage = sum(!is.na(midnight_tbl$midnight_storage_af)),
+  cnrfc_fallback_storage_enabled = cnrfc_fallback_storage_enabled,
+  cnrfc_fallback_storage_candidates = nrow(cnrfc_fallback_candidates),
+  cnrfc_fallback_storage_max_requests = cnrfc_fallback_max_requests,
+  cnrfc_fallback_storage_rows_parsed = nrow(cnrfc_fallback_storage_tbl),
   output_feature_count = nrow(latest_tbl),
   output_features_with_latest_storage = latest_count,
   output_features_with_midnight_storage = midnight_count,
+  output_features_with_cnrfc_fallback_storage = cnrfc_fallback_count,
   output_features_midnight_only = midnight_only_count,
   output_features_no_current_storage_cnrfc_only = no_current_storage_count,
   coverage_status = coverage_status,
   coverage_note = coverage_note,
   min_latest_rows_to_publish = min_latest_rows_to_publish,
   allow_degraded_publish = allow_degraded_publish,
-  max_obs_age_hours = if (latest_count > 0) max(latest_tbl$obs_age_hours[!is.na(latest_tbl$obs_age_hours)], na.rm = TRUE) else NA_real_,
+  max_obs_age_hours = if (sum(!is.na(latest_tbl$display_obs_age_hours)) > 0) max(latest_tbl$display_obs_age_hours[!is.na(latest_tbl$display_obs_age_hours)], na.rm = TRUE) else NA_real_,
   stale_12h_count = sum(latest_tbl$obs_stale_12h, na.rm = TRUE),
   stale_24h_count = sum(latest_tbl$obs_stale_24h, na.rm = TRUE),
   cnrfc_availability_csv = cnrfc_availability_csv,
@@ -1478,6 +1780,7 @@ message("GeoJSON:  ", out_geojson)
 message("Summary:  ", out_summary)
 message("Latest storage features: ", summary_obj$output_features_with_latest_storage)
 message("Midnight storage features: ", summary_obj$output_features_with_midnight_storage)
+message("CNRFC fallback storage features: ", summary_obj$output_features_with_cnrfc_fallback_storage)
 message("Midnight-only features: ", summary_obj$output_features_midnight_only)
 message("No-current-storage CNRFC-only features: ", summary_obj$output_features_no_current_storage_cnrfc_only)
 message("Coverage status: ", summary_obj$coverage_status)
@@ -1489,6 +1792,8 @@ message("Stale >12h: ", summary_obj$stale_12h_count)
 message("Stale >24h: ", summary_obj$stale_24h_count)
 message("CNRFC availability rows: ", summary_obj$cnrfc_availability_rows)
 message("CNRFC role override rows: ", summary_obj$cnrfc_role_override_rows)
+message("CNRFC fallback storage candidates: ", summary_obj$cnrfc_fallback_storage_candidates)
+message("CNRFC fallback storage rows parsed: ", summary_obj$cnrfc_fallback_storage_rows_parsed)
 message("Features using CNRFC role overrides: ", summary_obj$output_features_with_cnrfc_role_override)
 message("CDEC capacity override rows: ", summary_obj$capacity_override_rows)
 message("Features using capacity overrides: ", summary_obj$output_features_using_capacity_override)
