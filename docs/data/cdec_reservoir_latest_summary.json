@@ -1,5 +1,5 @@
 {
-  "feed_build_time_utc": "2026-05-26T22:54:24Z",
+  "feed_build_time_utc": "2026-05-27T04:58:33Z",
   "source": "https://cdec.water.ca.gov/dynamicapp/getAll?sens_num=15",
   "daily_source": "https://cdec.water.ca.gov/reportapp/javareports?name=RES",
   "station_index_rows": 218,
@@ -21,7 +21,7 @@
   "coverage_note": "CDEC latest sensor-15 table coverage appears normal; daily midnight fields are included where available.",
   "min_latest_rows_to_publish": 30,
   "allow_degraded_publish": false,
-  "max_obs_age_hours": 2.9171,
+  "max_obs_age_hours": 2.2321,
   "stale_12h_count": 0,
   "stale_24h_count": 0,
   "cnrfc_availability_csv": "data/input/cnrfc_reservoir_product_availability.csv",
