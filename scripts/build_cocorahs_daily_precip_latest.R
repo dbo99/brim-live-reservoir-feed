@@ -5,15 +5,20 @@
 #   static GeoJSON feed for BRIM Ops Live to load from GitHub Pages.
 #
 # OUTPUTS:
-#   docs/data/cocorahs_daily_precip_latest.geojson
-#   docs/data/cocorahs_daily_precip_latest_summary.json
+#   docs/data/cocorahs_daily_precip_ca_latest.geojson
+#   docs/data/cocorahs_daily_precip_ca_latest_summary.json
+#   docs/data/cocorahs_daily_precip_conus_latest.geojson
+#   docs/data/cocorahs_daily_precip_conus_latest_summary.json
 #
 # DESIGN:
 #   - CoCoRaHS API calls happen in GitHub Actions, not in each user's browser.
-#   - The browser loads a static GeoJSON file, avoiding local/file:// CORS
+#   - The browser loads static GeoJSON files, avoiding local/file:// CORS
 #     restrictions that blocked direct API fetches from standalone BRIM HTML.
-#   - RF011 starts with California only.  Additional western states can be added
-#     later by changing COCORAHS_STATES.
+#   - RF011g fetches CONUS once, then writes two feeds:
+#       1. a small California-only operational layer
+#       2. a broader CONUS curiosity / storm-context layer
+#   - The California subset is derived from station-number prefixes such as
+#     CA-SAC-1 because the live API did not reliably honor subdiv1=CA.
 #
 # HOW TO RUN LOCALLY FROM THIS REPOSITORY:
 #   Rscript scripts/build_cocorahs_daily_precip_latest.R
@@ -49,26 +54,54 @@ cocorahs_api_url <- Sys.getenv(
   unset = "https://api2.cocorahs.org/api/DailyPrecipObs"
 )
 
-out_geojson <- Sys.getenv(
-  "COCORAHS_DAILY_PRECIP_GEOJSON",
-  unset = "docs/data/cocorahs_daily_precip_latest.geojson"
+out_ca_geojson <- Sys.getenv(
+  "COCORAHS_CA_DAILY_PRECIP_GEOJSON",
+  unset = "docs/data/cocorahs_daily_precip_ca_latest.geojson"
 )
 
-out_summary <- Sys.getenv(
-  "COCORAHS_DAILY_PRECIP_SUMMARY_JSON",
-  unset = "docs/data/cocorahs_daily_precip_latest_summary.json"
+out_ca_summary <- Sys.getenv(
+  "COCORAHS_CA_DAILY_PRECIP_SUMMARY_JSON",
+  unset = "docs/data/cocorahs_daily_precip_ca_latest_summary.json"
+)
+
+out_conus_geojson <- Sys.getenv(
+  "COCORAHS_CONUS_DAILY_PRECIP_GEOJSON",
+  unset = "docs/data/cocorahs_daily_precip_conus_latest.geojson"
+)
+
+out_conus_summary <- Sys.getenv(
+  "COCORAHS_CONUS_DAILY_PRECIP_SUMMARY_JSON",
+  unset = "docs/data/cocorahs_daily_precip_conus_latest_summary.json"
 )
 
 cocorahs_states <- strsplit(Sys.getenv(
   "COCORAHS_STATES",
-  unset = "CA"
+  unset = "CONUS"
 ), ",", fixed = TRUE)[[1]]
 
 cocorahs_states <- toupper(trimws(cocorahs_states))
 cocorahs_states <- cocorahs_states[nzchar(cocorahs_states)]
 
 if (length(cocorahs_states) == 0) {
-  cocorahs_states <- "CA"
+  cocorahs_states <- "CONUS"
+}
+
+## Scope handling:
+##   - CONUS/US/ALL means do not pass subdiv1 to the CoCoRaHS API.
+##   - RF011g uses CONUS as the normal fetch scope, then derives the California
+##     feed locally from station-number prefixes. This avoids relying on the
+##     API's subdiv1 filter, which did not behave as expected in browser QA.
+cocorahs_conus_aliases <- c("CONUS", "US", "USA", "ALL", "NATIONAL")
+cocorahs_is_conus <- any(cocorahs_states %in% cocorahs_conus_aliases)
+
+if (isTRUE(cocorahs_is_conus)) {
+  cocorahs_states <- "CONUS"
+}
+
+cocorahs_scope_label <- if (isTRUE(cocorahs_is_conus)) {
+  "CONUS"
+} else {
+  paste(cocorahs_states, collapse = ",")
 }
 
 cocorahs_units <- Sys.getenv("COCORAHS_UNITS", unset = "english")
@@ -210,9 +243,12 @@ pt_query_url <- function(state, offset) {
     sortField = "obsDateTime",
     sortDir = "desc",
     country = "US",
-    subdiv1 = state,
     units = cocorahs_units
   )
+
+  if (!isTRUE(cocorahs_is_conus)) {
+    params$subdiv1 <- state
+  }
 
   paste0(cocorahs_api_url, "?", paste(
     paste0(utils::URLencode(names(params), reserved = TRUE), "=", utils::URLencode(unlist(params), reserved = TRUE)),
@@ -430,6 +466,16 @@ pt_record_features <- function(df) {
   units <- pt_chr(pt_get_col(df, c("units", "Units")))
   source <- pt_chr(pt_get_col(df, c("source", "Source")))
   state <- pt_chr(pt_get_col(df, c("state", "State", "subdiv1", "Subdiv1", "brim_query_state")))
+  state_from_station <- ifelse(
+    !is.na(station_number) & grepl("^[A-Z]{2}-", station_number),
+    substr(station_number, 1, 2),
+    NA_character_
+  )
+  state_final <- ifelse(
+    !is.na(state) & state != "" & state != "CONUS",
+    state,
+    state_from_station
+  )
 
   id <- pt_chr(pt_get_col(df, c("id", "Id", "dailyPrecipReportID", "DailyPrecipReportID", "uid", "Uid")))
 
@@ -468,7 +514,7 @@ pt_record_features <- function(df) {
       notes = if (!is.na(notes[i])) notes[i] else NULL,
       units = if (!is.na(units[i])) units[i] else cocorahs_units,
       source = if (!is.na(source[i])) source[i] else "CoCoRaHS",
-      state = if (!is.na(state[i])) state[i] else NA_character_,
+      state = if (!is.na(state_final[i])) state_final[i] else NA_character_,
       stationUrl = pt_station_url(station_number[i]),
       sourceWindowStartDate = start_date_chr,
       sourceWindowEndDate = end_date_chr,
@@ -523,88 +569,148 @@ if (nrow(rows) > 0) {
 
 features <- pt_record_features(rows)
 
-# ---- 5. Summary counts ------------------------------------------------------
+# ---- 5. Split feeds and build summaries -------------------------------------
 
-amounts <- if (length(features) > 0) {
-  vapply(features, function(f) {
-    p <- f$properties
-    pt_precip_amount(p$precip, p$gaugeCatch, p$precipIsTrace, p$gaugeCatchIsTrace)
-  }, numeric(1))
-} else {
-  numeric(0)
+`%||%` <- function(x, y) {
+  if (is.null(x)) y else x
 }
 
-trace_count <- if (length(features) > 0) {
-  sum(vapply(features, function(f) {
-    isTRUE(f$properties$precipIsTrace) || isTRUE(f$properties$gaugeCatchIsTrace)
-  }, logical(1)), na.rm = TRUE)
-} else {
-  0L
+pt_feature_state <- function(feature) {
+  p <- feature$properties %||% list()
+
+  state <- pt_chr(p$state)
+  if (!is.na(state) && state != "" && state != "CONUS") {
+    return(state)
+  }
+
+  station <- pt_chr(p$stationNumber)
+  if (!is.na(station) && grepl("^[A-Z]{2}-", station)) {
+    return(substr(station, 1, 2))
+  }
+
+  NA_character_
 }
 
-zero_count <- sum(!is.na(amounts) & amounts == 0, na.rm = TRUE)
-measurable_count <- sum(!is.na(amounts) & amounts > 0, na.rm = TRUE)
-missing_amount_count <- sum(is.na(amounts), na.rm = TRUE)
+features_conus <- features
+features_ca <- Filter(function(f) identical(pt_feature_state(f), "CA"), features_conus)
 
-summary <- list(
-  feed_name = "CoCoRaHS daily precipitation latest",
-  feed_build_time_utc = feed_build_time_utc,
-  source = "CoCoRaHS DailyPrecipObs API",
-  source_api_url = cocorahs_api_url,
-  states = as.list(cocorahs_states),
-  country = "US",
-  units = cocorahs_units,
-  timezone_for_date_window = tz_local,
-  start_date = start_date_chr,
-  end_date = end_date_chr,
-  lookback_days = lookback_days,
-  schedule_note = "GitHub workflow is intended to run about every 8 hours.",
-  api_total_count = api_total_count,
-  api_rows_fetched = api_rows_fetched,
-  output_feature_count = length(features),
-  measurable_count = measurable_count,
-  zero_count = zero_count,
-  trace_count = trace_count,
-  missing_amount_count = missing_amount_count,
-  max_precip_in = if (length(amounts) && any(!is.na(amounts))) max(amounts, na.rm = TRUE) else NA_real_,
-  query = list(
-    page_limit = cocorahs_limit,
-    max_pages_per_state = cocorahs_max_pages_per_state,
-    request_pause_sec = cocorahs_request_pause_sec
-  ),
-  caveat = "Volunteer-reported daily observations; use as supplemental screening and storm-verification context."
+pt_feature_amounts <- function(features) {
+  if (length(features) > 0) {
+    vapply(features, function(f) {
+      p <- f$properties
+      pt_precip_amount(p$precip, p$gaugeCatch, p$precipIsTrace, p$gaugeCatchIsTrace)
+    }, numeric(1))
+  } else {
+    numeric(0)
+  }
+}
+
+pt_trace_count <- function(features) {
+  if (length(features) > 0) {
+    sum(vapply(features, function(f) {
+      isTRUE(f$properties$precipIsTrace) || isTRUE(f$properties$gaugeCatchIsTrace)
+    }, logical(1)), na.rm = TRUE)
+  } else {
+    0L
+  }
+}
+
+pt_summary_for_scope <- function(features, scope_label, states, api_rows_scope_note) {
+  amounts <- pt_feature_amounts(features)
+  trace_count <- pt_trace_count(features)
+  zero_count <- sum(!is.na(amounts) & amounts == 0, na.rm = TRUE)
+  measurable_count <- sum(!is.na(amounts) & amounts > 0, na.rm = TRUE)
+  missing_amount_count <- sum(is.na(amounts), na.rm = TRUE)
+
+  list(
+    feed_name = paste0("CoCoRaHS daily precipitation latest - ", scope_label),
+    feed_build_time_utc = feed_build_time_utc,
+    source = "CoCoRaHS DailyPrecipObs API",
+    source_api_url = cocorahs_api_url,
+    scope = scope_label,
+    states = as.list(states),
+    country = "US",
+    units = cocorahs_units,
+    timezone_for_date_window = tz_local,
+    start_date = start_date_chr,
+    end_date = end_date_chr,
+    lookback_days = lookback_days,
+    schedule_note = "GitHub workflow is intended to run about every 8 hours.",
+    query_scope_note = "RF011g fetches CONUS once without subdiv1, then writes a California subset using CoCoRaHS station-number prefixes.",
+    api_total_count = api_total_count,
+    api_rows_fetched = api_rows_fetched,
+    output_feature_count = length(features),
+    measurable_count = measurable_count,
+    zero_count = zero_count,
+    trace_count = trace_count,
+    missing_amount_count = missing_amount_count,
+    max_precip_in = if (length(amounts) && any(!is.na(amounts))) max(amounts, na.rm = TRUE) else NA_real_,
+    query = list(
+      page_limit = cocorahs_limit,
+      max_pages_per_state = cocorahs_max_pages_per_state,
+      request_pause_sec = cocorahs_request_pause_sec,
+      api_rows_scope_note = api_rows_scope_note
+    ),
+    caveat = "Volunteer-reported daily observations; use as supplemental screening and storm-verification context."
+  )
+}
+
+summary_ca <- pt_summary_for_scope(
+  features = features_ca,
+  scope_label = "California",
+  states = "CA",
+  api_rows_scope_note = "California feed is filtered from the CONUS API rows using stationNumber prefix CA-."
 )
 
-geojson <- list(
+summary_conus <- pt_summary_for_scope(
+  features = features_conus,
+  scope_label = "CONUS",
+  states = "CONUS",
+  api_rows_scope_note = "CONUS feed uses all mappable API rows fetched without a subdiv1 filter."
+)
+
+geojson_ca <- list(
   type = "FeatureCollection",
-  name = "cocorahs_daily_precip_latest",
-  metadata = summary,
-  features = features
+  name = "cocorahs_daily_precip_ca_latest",
+  metadata = summary_ca,
+  features = features_ca
+)
+
+geojson_conus <- list(
+  type = "FeatureCollection",
+  name = "cocorahs_daily_precip_conus_latest",
+  metadata = summary_conus,
+  features = features_conus
 )
 
 # ---- 6. Write outputs -------------------------------------------------------
 
-dir.create(dirname(out_geojson), recursive = TRUE, showWarnings = FALSE)
-dir.create(dirname(out_summary), recursive = TRUE, showWarnings = FALSE)
+pt_write_feed <- function(geojson, summary, out_geojson, out_summary) {
+  dir.create(dirname(out_geojson), recursive = TRUE, showWarnings = FALSE)
+  dir.create(dirname(out_summary), recursive = TRUE, showWarnings = FALSE)
 
-jsonlite::write_json(
-  geojson,
-  path = out_geojson,
-  auto_unbox = TRUE,
-  pretty = FALSE,
-  null = "null",
-  na = "null"
-)
+  jsonlite::write_json(
+    geojson,
+    path = out_geojson,
+    auto_unbox = TRUE,
+    pretty = FALSE,
+    null = "null",
+    na = "null"
+  )
 
-jsonlite::write_json(
-  summary,
-  path = out_summary,
-  auto_unbox = TRUE,
-  pretty = TRUE,
-  null = "null",
-  na = "null"
-)
+  jsonlite::write_json(
+    summary,
+    path = out_summary,
+    auto_unbox = TRUE,
+    pretty = TRUE,
+    null = "null",
+    na = "null"
+  )
 
-message("Wrote GeoJSON: ", out_geojson)
-message("Wrote summary: ", out_summary)
-message("Output features: ", length(features))
+  message("Wrote GeoJSON: ", out_geojson)
+  message("Wrote summary: ", out_summary)
+  message("Output features: ", length(geojson$features))
+}
+
+pt_write_feed(geojson_ca, summary_ca, out_ca_geojson, out_ca_summary)
+pt_write_feed(geojson_conus, summary_conus, out_conus_geojson, out_conus_summary)
