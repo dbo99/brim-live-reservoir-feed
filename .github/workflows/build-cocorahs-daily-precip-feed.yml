@@ -50,7 +50,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/data/cocorahs_daily_precip_latest.geojson docs/data/cocorahs_daily_precip_latest_summary.json
+          git add \
+            docs/data/cocorahs_daily_precip_ca_latest.geojson \
+            docs/data/cocorahs_daily_precip_ca_latest_summary.json \
+            docs/data/cocorahs_daily_precip_conus_latest.geojson \
+            docs/data/cocorahs_daily_precip_conus_latest_summary.json
           if git diff --cached --quiet; then
             echo "No CoCoRaHS feed changes to commit."
           else
