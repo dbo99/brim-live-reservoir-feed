@@ -1,6 +1,6 @@
 {
   "feed_name": "CoCoRaHS daily precipitation latest - California",
-  "feed_build_time_utc": "2026-05-28T05:45:21Z",
+  "feed_build_time_utc": "2026-05-28T05:57:33Z",
   "source": "CoCoRaHS DailyPrecipObs API",
   "source_api_url": "https://api2.cocorahs.org/api/DailyPrecipObs",
   "scope": "California",
@@ -15,8 +15,8 @@
   "lookback_days": 1,
   "schedule_note": "GitHub workflow is intended to run about every 8 hours.",
   "query_scope_note": "RF011g fetches CONUS once without subdiv1, then writes a California subset using CoCoRaHS station-number prefixes.",
-  "api_total_count": 14729,
-  "api_rows_fetched": 14729,
+  "api_total_count": 14732,
+  "api_rows_fetched": 14732,
   "output_feature_count": 395,
   "measurable_count": 232,
   "zero_count": 162,
