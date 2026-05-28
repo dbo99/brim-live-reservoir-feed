@@ -1,0 +1,30 @@
+{
+  "feed_name": "CoCoRaHS daily precipitation latest",
+  "feed_build_time_utc": "2026-05-28T04:49:53Z",
+  "source": "CoCoRaHS DailyPrecipObs API",
+  "source_api_url": "https://api2.cocorahs.org/api/DailyPrecipObs",
+  "states": [
+    "CA"
+  ],
+  "country": "US",
+  "units": "english",
+  "timezone_for_date_window": "America/Los_Angeles",
+  "start_date": "2026-05-27",
+  "end_date": "2026-05-28",
+  "lookback_days": 1,
+  "schedule_note": "GitHub workflow is intended to run about every 8 hours.",
+  "api_total_count": 14708,
+  "api_rows_fetched": 14708,
+  "output_feature_count": 14708,
+  "measurable_count": 8913,
+  "zero_count": 5781,
+  "trace_count": 623,
+  "missing_amount_count": 14,
+  "max_precip_in": 6.14,
+  "query": {
+    "page_limit": 5000,
+    "max_pages_per_state": 10,
+    "request_pause_sec": 0.25
+  },
+  "caveat": "Volunteer-reported daily observations; use as supplemental screening and storm-verification context."
+}
