@@ -1,0 +1,61 @@
+name: Build USGS CA streamflow latest GeoJSON
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every 4 hours. GitHub schedules are UTC and may not run exactly on the minute.
+    # This is intentionally less frequent than a true operational forecast feed.
+    - cron: "23 */4 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  build-feed:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "release"
+
+      - name: Install Linux system libraries
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            libxml2-dev
+
+      - name: Install R packages
+        shell: Rscript {0}
+        run: |
+          install.packages(
+            c("dataRetrieval", "dplyr", "readr", "lubridate", "jsonlite", "tibble", "purrr"),
+            repos = "https://cloud.r-project.org"
+          )
+
+      - name: Build latest USGS CA streamflow GeoJSON
+        shell: Rscript {0}
+        run: |
+          source("scripts/build_usgs_streamflow_latest_ca.R")
+
+      - name: Commit updated feed files
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            docs/data/usgs_streamflow_latest_ca.geojson \
+            docs/data/usgs_streamflow_latest_ca_summary.json
+          if git diff --cached --quiet; then
+            echo "No USGS streamflow feed changes to commit."
+          else
+            git commit -m "Update USGS CA streamflow latest feed"
+            git push
+          fi
