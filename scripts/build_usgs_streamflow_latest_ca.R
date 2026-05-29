@@ -64,6 +64,17 @@ if (length(missing_dataretrieval_funs) > 0) {
   )
 }
 
+## RF024d:
+##   Some versions of dataRetrieval/cli can throw progress-bar formatting
+##   errors inside the modern Water Data API helpers, especially during larger
+##   daily-data chunk requests.  The feed does its own simple console progress,
+##   so suppress package progress UI where possible and keep direct API
+##   fallbacks below for daily chunks if dataRetrieval still trips over cli.
+options(
+  cli.progress_show_after = Inf,
+  cli.progress_handlers = "none"
+)
+
 suppressPackageStartupMessages({
   library(dataRetrieval)
   library(dplyr)
@@ -257,6 +268,92 @@ pt_has_cols <- function(df, cols) {
   all(cols %in% names(df))
 }
 
+pt_ogc_query_url <- function(collection, params) {
+  base <- paste0(
+    "https://api.waterdata.usgs.gov/ogcapi/v0/collections/",
+    collection,
+    "/items"
+  )
+
+  params <- params[!vapply(params, function(x) is.null(x) || length(x) == 0, logical(1))]
+  params <- lapply(params, function(x) paste(as.character(x), collapse = ","))
+
+  query <- paste(
+    paste0(
+      names(params),
+      "=",
+      vapply(params, utils::URLencode, character(1), reserved = TRUE)
+    ),
+    collapse = "&"
+  )
+
+  paste0(base, "?", query)
+}
+
+pt_fetch_ogc_properties <- function(url, label = url) {
+  message("Requesting direct Water Data API fallback: ", label)
+
+  x <- tryCatch(
+    jsonlite::fromJSON(url, simplifyVector = TRUE),
+    error = function(e) e
+  )
+
+  if (inherits(x, "error")) {
+    warning("Direct Water Data API fallback failed for ", label, ": ", conditionMessage(x))
+    return(tibble::tibble())
+  }
+
+  if (!"features" %in% names(x) || is.null(x$features) || length(x$features) == 0) {
+    return(tibble::tibble())
+  }
+
+  props <- NULL
+
+  if (is.data.frame(x$features) && "properties" %in% names(x$features)) {
+    props <- x$features$properties
+  } else if (is.list(x$features) && !is.null(x$features$properties)) {
+    props <- x$features$properties
+  }
+
+  if (is.null(props)) {
+    return(tibble::tibble())
+  }
+
+  tibble::as_tibble(props)
+}
+
+pt_fetch_daily_chunk_direct <- function(site_ids, start_date, end_date, label) {
+  url <- pt_ogc_query_url(
+    collection = "daily",
+    params = list(
+      f = "json",
+      lang = "en-US",
+      skipGeometry = "TRUE",
+      properties = paste(
+        c(
+          "monitoring_location_id",
+          "parameter_code",
+          "statistic_id",
+          "time",
+          "value",
+          "unit_of_measure",
+          "qualifier",
+          "approval_status",
+          "last_modified"
+        ),
+        collapse = ","
+      ),
+      monitoring_location_id = paste(pt_usgs_monitoring_location_id(site_ids), collapse = ","),
+      parameter_code = "00060",
+      statistic_id = "00003",
+      time = pt_waterdata_time_interval(start_date, end_date),
+      limit = "50000"
+    )
+  )
+
+  pt_fetch_ogc_properties(url, label = paste0("daily chunk ", label))
+}
+
 pt_compact_code <- function(qualifier, approval_status) {
   qualifier <- pt_chr(qualifier)
   approval_status <- pt_chr(approval_status)
@@ -302,6 +399,8 @@ pt_fetch_latest_continuous_chunk <- function(site_ids, time_filter, label) {
 pt_fetch_daily_chunk <- function(site_ids, start_date, end_date, label) {
   ## RF024c: use the modern daily Water Data API rather than legacy
   ## readNWISdv(). Daily data are used only for compact history/context.
+  ## RF024d: if dataRetrieval fails because of cli/progress formatting, retry
+  ## the same OGC API request directly and return its properties table.
   tryCatch({
     dataRetrieval::read_waterdata_daily(
       monitoring_location_id = pt_usgs_monitoring_location_id(site_ids),
@@ -322,8 +421,19 @@ pt_fetch_daily_chunk <- function(site_ids, start_date, end_date, label) {
       skipGeometry = TRUE
     )
   }, error = function(e) {
-    warning("USGS daily Water Data API chunk failed for ", label, ": ", conditionMessage(e))
-    tibble::tibble()
+    warning(
+      "USGS daily Water Data API chunk failed through dataRetrieval for ",
+      label,
+      ": ",
+      conditionMessage(e),
+      ". Trying direct OGC API fallback."
+    )
+    pt_fetch_daily_chunk_direct(
+      site_ids = site_ids,
+      start_date = start_date,
+      end_date = end_date,
+      label = label
+    )
   })
 }
 
@@ -762,7 +872,7 @@ summary <- list(
   min_q_cfs = suppressWarnings(min(latest_tbl$q_cfs, na.rm = TRUE)),
   notes = c(
     "Latest discharge and stage values are from USGS Water Data API latest-continuous values where available.",
-    "USGS Water Data API daily values are used only for compact recent-history context.",
+    "USGS Water Data API daily values are used only for compact recent-history context; daily chunks can fall back to direct OGC API calls if dataRetrieval progress UI fails.",
     "CNRFC/HADS/APRFC links are included only where the optional NWSLI crosswalk provides an ID."
   )
 )
