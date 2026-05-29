@@ -1,5 +1,5 @@
 {
-  "feed_build_time_utc": "2026-05-29T22:46:33Z",
+  "feed_build_time_utc": "2026-05-29T23:30:06Z",
   "scope": "CA",
   "retrieval_backend": "dataRetrieval::read_waterdata_latest_continuous + read_waterdata_daily",
   "station_index_rows": 2387,
