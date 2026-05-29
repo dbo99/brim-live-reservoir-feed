@@ -40,7 +40,7 @@ jobs:
       - name: Install R package dependencies
         uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          cache-version: usgs-streamflow-v1
+          cache-version: usgs-streamflow-v2
           packages: |
             any::dataRetrieval
             any::dplyr
@@ -55,9 +55,11 @@ jobs:
       - name: Build latest USGS CA streamflow GeoJSON
         shell: Rscript {0}
         env:
-          USGS_STREAMFLOW_HISTORY_MODE: dv_3day
+          USGS_STREAMFLOW_HISTORY_MODE: none
           USGS_STREAMFLOW_MIN_LATEST_Q_TO_PUBLISH: "100"
           USGS_STREAMFLOW_ALLOW_DEGRADED_PUBLISH: "false"
+          # Optional: create this repository secret for higher USGS Water Data API rate limits.
+          API_USGS_PAT: ${{ secrets.API_USGS_PAT }}
         run: |
           source("scripts/build_usgs_streamflow_latest_ca.R")
 
