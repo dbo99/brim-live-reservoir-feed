@@ -4,7 +4,6 @@ on:
   workflow_dispatch:
   schedule:
     # Every 4 hours. GitHub schedules are UTC and may not run exactly on the minute.
-    # This is intentionally less frequent than a true operational forecast feed.
     - cron: "23 */4 * * *"
 
 permissions:
@@ -13,6 +12,7 @@ permissions:
 jobs:
   build-feed:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
 
     steps:
       - name: Check out repository
@@ -32,11 +32,11 @@ jobs:
             libssl-dev \
             libxml2-dev
 
-      - name: Install R packages
+      - name: Install lean R packages
         shell: Rscript {0}
         run: |
           install.packages(
-            c("dataRetrieval", "dplyr", "readr", "lubridate", "jsonlite", "tibble", "purrr"),
+            c("curl", "jsonlite"),
             repos = "https://cloud.r-project.org"
           )
 
