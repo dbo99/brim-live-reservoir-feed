@@ -1,5 +1,5 @@
 {
-  "feed_build_time_utc": "2026-05-30T04:32:37Z",
+  "feed_build_time_utc": "2026-05-30T10:22:00Z",
   "scope": "CA",
   "retrieval_backend": "dataRetrieval::read_waterdata_latest_continuous + read_waterdata_daily",
   "station_index_rows": 2387,
@@ -14,11 +14,14 @@
   "stale_discharge_72h_count": 0,
   "no_recent_iv_discharge_count": 1928,
   "nwsli_crosswalk_count": 391,
+  "cnrfc_obs_available_count": 58,
+  "cnrfc_deterministic_available_count": 58,
+  "cnrfc_ensemble_available_count": 58,
   "history_mode": "none",
   "history_query_start_date": null,
   "history_query_end_date": null,
   "dv_history_count": 0,
-  "max_q_cfs": 12500,
-  "min_q_cfs": -22.7,
-  "notes": ["Latest discharge and stage values are from USGS Water Data API latest-continuous values where available.", "USGS Water Data API daily values are used only for compact recent-history context; daily chunks can fall back to direct OGC API calls if dataRetrieval progress UI fails.", "CNRFC/HADS/APRFC links are included only where the optional NWSLI crosswalk provides an ID.", "USGS rating-table links are generated from official USGS rating-file URL templates and may be unavailable for sites without traditional stage-discharge ratings."]
+  "max_q_cfs": 12600,
+  "min_q_cfs": -5.51,
+  "notes": ["Latest discharge and stage values are from USGS Water Data API latest-continuous values where available.", "USGS Water Data API daily values are used only for compact recent-history context; daily chunks can fall back to direct OGC API calls if dataRetrieval progress UI fails.", "CNRFC/HADS/APRFC links are included only where the optional NWSLI crosswalk provides an ID.", "USGS rating-table links are generated from official USGS rating-file URL templates and may be unavailable for sites without traditional stage-discharge ratings.", "CNRFC observation, deterministic forecast, and ensemble links are shown only when the crosswalked NWSLI appears on checked CNRFC product pages during the feed build."]
 }
