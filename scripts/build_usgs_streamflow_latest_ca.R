@@ -358,6 +358,24 @@ pt_fetch_text <- function(url, label, timeout_sec = 25) {
     return(NA_character_)
   }
 
+  ## RF026b:
+  ##   Some NOAA/CNRFC pages can include non-UTF-8 or otherwise invalid byte
+  ##   sequences.  R's toupper() can fail on those bytes before the actual
+  ##   NWSLI lookup happens.  Normalize to valid UTF-8 and replace undecodable
+  ##   bytes with spaces; the five-character NWSLI strings we are searching for
+  ##   are plain ASCII and are preserved by this cleanup.
+  txt <- enc2utf8(txt)
+  txt <- iconv(txt, from = "", to = "UTF-8", sub = " ")
+
+  if (is.na(txt)) {
+    txt <- iconv(rawToChar(resp$content), from = "latin1", to = "UTF-8", sub = " ")
+  }
+
+  if (is.na(txt) || !nzchar(txt)) {
+    warning("CNRFC availability page could not be normalized to text for ", label)
+    return(NA_character_)
+  }
+
   toupper(txt)
 }
 
