@@ -10,6 +10,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: live-data-feed-writes-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-feed:
     runs-on: ubuntu-latest
@@ -59,5 +63,6 @@ jobs:
             echo "No CoCoRaHS feed changes to commit."
           else
             git commit -m "Update CoCoRaHS daily precip feed"
+            git pull --rebase origin main
             git push
           fi
