@@ -1,15 +1,15 @@
 {
-  "feed_build_time_utc": "2026-05-29T23:30:06Z",
+  "feed_build_time_utc": "2026-05-30T04:26:37Z",
   "scope": "CA",
   "retrieval_backend": "dataRetrieval::read_waterdata_latest_continuous + read_waterdata_daily",
   "station_index_rows": 2387,
   "output_feature_count": 2387,
-  "iv_query_start_date": "2026-05-26",
-  "iv_query_end_date": "2026-05-30",
+  "iv_query_start_date": "2026-05-27",
+  "iv_query_end_date": "2026-05-31",
   "iv_lookback_days": 3,
   "latest_iv_discharge_count": 437,
   "latest_iv_stage_count": 458,
-  "stale_discharge_6h_count": 2,
+  "stale_discharge_6h_count": 1,
   "stale_discharge_24h_count": 0,
   "stale_discharge_72h_count": 0,
   "no_recent_iv_discharge_count": 1928,
@@ -18,7 +18,7 @@
   "history_query_start_date": null,
   "history_query_end_date": null,
   "dv_history_count": 0,
-  "max_q_cfs": 14000,
-  "min_q_cfs": -22.6,
-  "notes": ["Latest discharge and stage values are from USGS Water Data API latest-continuous values where available.", "USGS Water Data API daily values are used only for compact recent-history context; daily chunks can fall back to direct OGC API calls if dataRetrieval progress UI fails.", "CNRFC/HADS/APRFC links are included only where the optional NWSLI crosswalk provides an ID."]
+  "max_q_cfs": 12500,
+  "min_q_cfs": -22.7,
+  "notes": ["Latest discharge and stage values are from USGS Water Data API latest-continuous values where available.", "USGS Water Data API daily values are used only for compact recent-history context; daily chunks can fall back to direct OGC API calls if dataRetrieval progress UI fails.", "CNRFC/HADS/APRFC links are included only where the optional NWSLI crosswalk provides an ID.", "USGS rating-table links are generated from official USGS rating-file URL templates and may be unavailable for sites without traditional stage-discharge ratings."]
 }
