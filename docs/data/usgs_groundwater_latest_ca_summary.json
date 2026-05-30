@@ -1,5 +1,5 @@
 {
-  "feed_build_time_utc": "2026-05-30T09:02:46Z",
+  "feed_build_time_utc": "2026-05-30T14:56:15Z",
   "scope": "CA",
   "retrieval_backend": "dataRetrieval::read_waterdata_field_measurements",
   "parameter_code": "72019",
