@@ -84,6 +84,16 @@ station_index_csv <- Sys.getenv(
   unset = "data/input/usgs_groundwater_latest_index_ca.csv"
 )
 
+## RF029:
+##   Optional compact history-summary table produced by the local BRIM-side
+##   groundwater history preprocessor. If this CSV is present in the live-feed
+##   repo input folder, the daily latest feed joins it into the GeoJSON feature
+##   properties. If it is absent, the latest-only feed still runs normally.
+history_summary_csv <- Sys.getenv(
+  "USGS_GW_HISTORY_SUMMARY_CSV",
+  unset = "data/input/usgs_groundwater_history_summary_ca.csv"
+)
+
 out_geojson <- Sys.getenv(
   "USGS_GW_GEOJSON",
   unset = "docs/data/usgs_groundwater_latest_ca.geojson"
@@ -589,7 +599,36 @@ if (nrow(station_index) < min_features_to_publish) {
 
 message("USGS groundwater station index rows: ", nrow(station_index))
 
-# ---- 5. Fetch latest groundwater field measurements ------------------------
+# ---- 5. Read optional RF029 groundwater history summary ---------------------
+
+history_summary <- tibble::tibble(site_no = character())
+history_summary_rows <- 0L
+history_summary_joined_fields <- character(0)
+
+if (file.exists(history_summary_csv)) {
+  history_summary_raw <- readr::read_csv(
+    history_summary_csv,
+    show_col_types = FALSE,
+    col_types = readr::cols(.default = readr::col_character())
+  )
+
+  if (!"site_no" %in% names(history_summary_raw)) {
+    warning("Groundwater history summary CSV exists but is missing site_no: ", history_summary_csv)
+  } else {
+    history_summary <- history_summary_raw |>
+      dplyr::mutate(site_no = pt_site_no(.data$site_no)) |>
+      dplyr::filter(!is.na(.data$site_no)) |>
+      dplyr::distinct(.data$site_no, .keep_all = TRUE)
+
+    history_summary_rows <- nrow(history_summary)
+    history_summary_joined_fields <- setdiff(names(history_summary), "site_no")
+    message("USGS groundwater RF029 history summary rows read: ", history_summary_rows)
+  }
+} else {
+  message("No optional RF029 groundwater history summary CSV found: ", history_summary_csv)
+}
+
+# ---- 6. Fetch latest groundwater field measurements ------------------------
 
 fetch_result <- pt_fetch_latest_groundwater(
   site_ids = station_index$site_no,
@@ -610,10 +649,11 @@ if (api_latest_count < min_api_sites_to_publish) {
   )
 }
 
-# ---- 6. Join and create feed table -----------------------------------------
+# ---- 7. Join and create feed table -----------------------------------------
 
 latest_tbl <- station_index |>
   dplyr::left_join(api_latest, by = "site_no") |>
+  dplyr::left_join(history_summary, by = "site_no") |>
   dplyr::mutate(
     has_api_latest_wl = !is.na(.data$api_latest_wl_ft_bgs),
 
@@ -707,7 +747,7 @@ index_fallback_count <- sum(!latest_tbl$has_api_latest_wl, na.rm = TRUE)
 message("USGS groundwater output feature count: ", nrow(latest_tbl))
 message("USGS groundwater index-fallback feature count: ", index_fallback_count)
 
-# ---- 7. Write GeoJSON and summary ------------------------------------------
+# ---- 8. Write GeoJSON and summary ------------------------------------------
 
 features <- lapply(seq_len(nrow(latest_tbl)), function(i) pt_make_feature(latest_tbl[i, ]))
 
@@ -717,6 +757,8 @@ geojson <- list(
   metadata = list(
     feed_build_time_utc = feed_build_time_utc,
     station_index_csv = station_index_csv,
+    history_summary_csv = ifelse(file.exists(history_summary_csv), history_summary_csv, NA_character_),
+    history_summary_rows = history_summary_rows,
     scope = "CA",
     parameter_code = gw_parameter_code,
     retrieval_backend = "dataRetrieval::read_waterdata_field_measurements",
@@ -745,6 +787,12 @@ summary <- list(
   retrieval_backend = "dataRetrieval::read_waterdata_field_measurements",
   parameter_code = gw_parameter_code,
   station_index_rows = nrow(station_index),
+  history_summary_csv_found = file.exists(history_summary_csv),
+  history_summary_rows = history_summary_rows,
+  history_summary_joined_field_count = length(history_summary_joined_fields),
+  history_sites_with_plot_json = if ("hist_plot_wy_mean_json" %in% names(latest_tbl)) sum(!is.na(latest_tbl$hist_plot_wy_mean_json) & latest_tbl$hist_plot_wy_mean_json != "", na.rm = TRUE) else 0L,
+  history_sites_with_por_percentile = if ("hist_por_deeper_pctile" %in% names(latest_tbl)) sum(!is.na(latest_tbl$hist_por_deeper_pctile), na.rm = TRUE) else 0L,
+  history_sites_with_seasonal_percentile = if ("hist_seasonal_deeper_pctile" %in% names(latest_tbl)) sum(!is.na(latest_tbl$hist_seasonal_deeper_pctile), na.rm = TRUE) else 0L,
   output_feature_count = nrow(latest_tbl),
   api_latest_site_count = api_latest_count,
   index_fallback_count = index_fallback_count,
@@ -769,7 +817,8 @@ summary <- list(
     "The BRIM input index provides stable site locations and well construction/aquifer fields.",
     "Index fallback is used only for sites without an API result in the query window when enabled; fallback rows are flagged with has_api_latest_wl = false.",
     "Screen/perforation interval fields are preserved if available in the input, but the current RF027a candidate export found no populated screen interval fields.",
-    "USGS groundwater field measurements are low-frequency and may be provisional; interpret values with well construction, datum, aquifer/screen interval, and measurement history."
+    "USGS groundwater field measurements are low-frequency and may be provisional; interpret values with well construction, datum, aquifer/screen interval, and measurement history.",
+    "If RF029 history summary CSV is present, compact water-year history and percentile fields are joined into the hosted GeoJSON for popup/mini-plot use."
   )
 )
 
