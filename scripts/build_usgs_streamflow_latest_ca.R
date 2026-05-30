@@ -35,7 +35,7 @@
 # ---- 1. Packages ------------------------------------------------------------
 
 required_pkgs <- c(
-  "dataRetrieval", "dplyr", "readr", "lubridate", "jsonlite", "tibble", "purrr"
+  "dataRetrieval", "dplyr", "readr", "lubridate", "jsonlite", "tibble", "purrr", "curl"
 )
 
 missing_pkgs <- required_pkgs[!vapply(required_pkgs, requireNamespace, logical(1), quietly = TRUE)]
@@ -83,6 +83,7 @@ suppressPackageStartupMessages({
   library(jsonlite)
   library(tibble)
   library(purrr)
+  library(curl)
 })
 
 # ---- 2. Paths, constants, and switches -------------------------------------
@@ -320,6 +321,107 @@ pt_fetch_ogc_properties <- function(url, label = url) {
   }
 
   tibble::as_tibble(props)
+}
+
+
+pt_fetch_text <- function(url, label, timeout_sec = 25) {
+  message("Fetching CNRFC availability page: ", label)
+
+  h <- curl::new_handle(
+    timeout = timeout_sec,
+    connecttimeout = 10,
+    useragent = "BRIM live-feed availability checker"
+  )
+
+  resp <- tryCatch(
+    curl::curl_fetch_memory(url, handle = h),
+    error = function(e) e
+  )
+
+  if (inherits(resp, "error")) {
+    warning("Could not fetch CNRFC availability page for ", label, ": ", conditionMessage(resp))
+    return(NA_character_)
+  }
+
+  if (!is.null(resp$status_code) && resp$status_code >= 400) {
+    warning("CNRFC availability page returned HTTP ", resp$status_code, " for ", label)
+    return(NA_character_)
+  }
+
+  txt <- tryCatch(
+    rawToChar(resp$content),
+    error = function(e) e
+  )
+
+  if (inherits(txt, "error")) {
+    warning("Could not decode CNRFC availability page for ", label, ": ", conditionMessage(txt))
+    return(NA_character_)
+  }
+
+  toupper(txt)
+}
+
+pt_nwsli_on_page <- function(nwsli, page_text) {
+  nwsli <- toupper(pt_chr(nwsli))
+  if (is.na(nwsli) || nwsli == "") return(NA)
+  if (is.na(page_text) || !nzchar(page_text)) return(NA)
+  grepl(nwsli, page_text, fixed = TRUE)
+}
+
+pt_cnrfc_availability_table <- function(nwsli_values) {
+  nwsli_values <- unique(toupper(pt_chr(nwsli_values)))
+  nwsli_values <- nwsli_values[!is.na(nwsli_values) & nwsli_values != ""]
+
+  if (length(nwsli_values) == 0) {
+    return(tibble::tibble(
+      nwsli = character(),
+      cnrfc_availability_checked = logical(),
+      has_cnrfc_obs_page = logical(),
+      has_cnrfc_deterministic_forecast = logical(),
+      has_cnrfc_ensemble_forecast = logical(),
+      cnrfc_availability_note = character()
+    ))
+  }
+
+  pages <- list(
+    obs = list(
+      label = "CNRFC observed river points",
+      url = "https://www.cnrfc.noaa.gov/?product=zeroFCSTcombo&combolink=Obs"
+    ),
+    det = list(
+      label = "CNRFC deterministic forecast points",
+      url = "https://www.cnrfc.noaa.gov/?product=zeroFCSTcombo"
+    ),
+    ens = list(
+      label = "CNRFC ensemble forecast points",
+      url = "https://www.cnrfc.noaa.gov/?product=ensPoints&combolink=Obs"
+    )
+  )
+
+  obs_txt <- pt_fetch_text(pages$obs$url, pages$obs$label)
+  det_txt <- pt_fetch_text(pages$det$url, pages$det$label)
+  ens_txt <- pt_fetch_text(pages$ens$url, pages$ens$label)
+
+  checked_any <- !is.na(obs_txt) || !is.na(det_txt) || !is.na(ens_txt)
+
+  out <- tibble::tibble(nwsli = nwsli_values) |>
+    dplyr::mutate(
+      cnrfc_availability_checked = checked_any,
+      has_cnrfc_obs_page = vapply(.data$nwsli, pt_nwsli_on_page, logical(1), page_text = obs_txt),
+      has_cnrfc_deterministic_forecast = vapply(.data$nwsli, pt_nwsli_on_page, logical(1), page_text = det_txt),
+      has_cnrfc_ensemble_forecast = vapply(.data$nwsli, pt_nwsli_on_page, logical(1), page_text = ens_txt),
+      cnrfc_availability_note = dplyr::case_when(
+        .data$cnrfc_availability_checked ~ "CNRFC product-page availability checked during BRIM feed build.",
+        TRUE ~ "CNRFC product-page availability could not be checked during BRIM feed build; CNRFC links are suppressed except HADS/APRFC template links."
+      )
+    )
+
+  message("CNRFC availability check: ",
+          sum(out$has_cnrfc_obs_page, na.rm = TRUE), " observed; ",
+          sum(out$has_cnrfc_deterministic_forecast, na.rm = TRUE), " deterministic; ",
+          sum(out$has_cnrfc_ensemble_forecast, na.rm = TRUE), " ensemble among crosswalked NWSLI IDs.")
+
+  out
 }
 
 pt_fetch_daily_chunk_direct <- function(site_ids, start_date, end_date, label) {
@@ -732,6 +834,8 @@ if (file.exists(nwsli_crosswalk_csv)) {
 
 message("USGS-CNRFC/NWSLI crosswalk rows read: ", nrow(xwalk))
 
+cnrfc_availability <- pt_cnrfc_availability_table(xwalk$nwsli)
+
 # ---- 5. Fetch latest continuous values and optional daily context -----------
 
 run_date_utc <- as.Date(lubridate::with_tz(feed_build_time, "UTC"))
@@ -764,6 +868,7 @@ latest_tbl <- station_index |>
   dplyr::left_join(latest_iv, by = "site_no") |>
   dplyr::left_join(history_dv, by = "site_no") |>
   dplyr::left_join(xwalk, by = "site_no") |>
+  dplyr::left_join(cnrfc_availability, by = "nwsli") |>
   dplyr::mutate(
     has_latest_iv_q = !is.na(.data$q_cfs),
     has_latest_iv_stage = !is.na(.data$stage_ft),
@@ -789,14 +894,31 @@ latest_tbl <- station_index |>
     usgs_rating_depot_url = paste0(
       "https://waterdata.usgs.gov/nwisweb/get_ratings?file_type=exsa&site_no=", .data$site_no
     ),
+    cnrfc_availability_checked = dplyr::coalesce(.data$cnrfc_availability_checked, FALSE),
+    has_cnrfc_obs_page = dplyr::coalesce(.data$has_cnrfc_obs_page, FALSE),
+    has_cnrfc_deterministic_forecast = dplyr::coalesce(.data$has_cnrfc_deterministic_forecast, FALSE),
+    has_cnrfc_ensemble_forecast = dplyr::coalesce(.data$has_cnrfc_ensemble_forecast, FALSE),
+    cnrfc_availability_note = dplyr::coalesce(
+      .data$cnrfc_availability_note,
+      dplyr::if_else(
+        .data$has_nwsli,
+        "NWSLI crosswalk exists, but this ID was not found on the checked CNRFC product pages during the BRIM feed build.",
+        NA_character_
+      )
+    ),
     cnrfc_obs_url = dplyr::if_else(
-      .data$has_nwsli,
+      .data$has_nwsli & .data$has_cnrfc_obs_page,
       paste0("https://www.cnrfc.noaa.gov/obsRiver_hc.php?id=", .data$nwsli),
       NA_character_
     ),
     cnrfc_forecast_url = dplyr::if_else(
-      .data$has_nwsli,
+      .data$has_nwsli & .data$has_cnrfc_deterministic_forecast,
       paste0("https://www.cnrfc.noaa.gov/graphicalRVF.php?id=", .data$nwsli),
+      NA_character_
+    ),
+    cnrfc_ensemble_url = dplyr::if_else(
+      .data$has_nwsli & .data$has_cnrfc_ensemble_forecast,
+      paste0("https://www.cnrfc.noaa.gov/ensembleProduct.php?id=", .data$nwsli),
       NA_character_
     ),
     hads_metadata_url = dplyr::if_else(
@@ -871,6 +993,9 @@ summary <- list(
   stale_discharge_72h_count = sum(latest_tbl$q_stale_72h, na.rm = TRUE),
   no_recent_iv_discharge_count = sum(latest_tbl$latest_status == "no_recent_iv_discharge", na.rm = TRUE),
   nwsli_crosswalk_count = sum(latest_tbl$has_nwsli, na.rm = TRUE),
+  cnrfc_obs_available_count = sum(latest_tbl$has_cnrfc_obs_page, na.rm = TRUE),
+  cnrfc_deterministic_available_count = sum(latest_tbl$has_cnrfc_deterministic_forecast, na.rm = TRUE),
+  cnrfc_ensemble_available_count = sum(latest_tbl$has_cnrfc_ensemble_forecast, na.rm = TRUE),
   history_mode = history_mode,
   history_query_start_date = ifelse(history_mode == "none", NA_character_, dv_start),
   history_query_end_date = ifelse(history_mode == "none", NA_character_, dv_end),
@@ -881,7 +1006,8 @@ summary <- list(
     "Latest discharge and stage values are from USGS Water Data API latest-continuous values where available.",
     "USGS Water Data API daily values are used only for compact recent-history context; daily chunks can fall back to direct OGC API calls if dataRetrieval progress UI fails.",
     "CNRFC/HADS/APRFC links are included only where the optional NWSLI crosswalk provides an ID.",
-    "USGS rating-table links are generated from official USGS rating-file URL templates and may be unavailable for sites without traditional stage-discharge ratings."
+    "USGS rating-table links are generated from official USGS rating-file URL templates and may be unavailable for sites without traditional stage-discharge ratings.",
+    "CNRFC observation, deterministic forecast, and ensemble links are shown only when the crosswalked NWSLI appears on checked CNRFC product pages during the feed build."
   )
 )
 
