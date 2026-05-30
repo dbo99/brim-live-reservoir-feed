@@ -33,12 +33,15 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends             libcurl4-openssl-dev             libssl-dev             libxml2-dev             libudunits2-dev             libgdal-dev             libgeos-dev             libproj-dev
+          sudo apt-get install -y --no-install-recommends \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            libxml2-dev
 
       - name: Install R package dependencies
         uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          cache-version: usgs-groundwater-v1
+          cache-version: usgs-groundwater-v2-slim
           packages: |
             any::dataRetrieval
             any::dplyr
@@ -46,7 +49,6 @@ jobs:
             any::lubridate
             any::jsonlite
             any::tibble
-            any::purrr
             any::curl
 
       - name: Build latest USGS CA groundwater GeoJSON
