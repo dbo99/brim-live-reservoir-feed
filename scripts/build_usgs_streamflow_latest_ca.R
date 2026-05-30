@@ -777,10 +777,17 @@ latest_tbl <- station_index |>
       .data$has_latest_iv_stage ~ "stage_only_recent_iv",
       TRUE ~ "no_recent_iv_discharge"
     ),
-    usgs_monitoring_location_url = paste0("https://waterdata.usgs.gov/monitoring-location/", .data$site_no, "/"),
-    usgs_hydrograph_url = paste0(
-      "https://waterdata.usgs.gov/monitoring-location/", .data$site_no,
-      "/#parameterCode=00060&period=P7D&showMedian=false"
+    usgs_monitoring_location_url = paste0("https://waterdata.usgs.gov/monitoring-location/USGS-", .data$site_no, "/"),
+    usgs_7day_flow_plot_url = paste0(
+      "https://waterdata.usgs.gov/monitoring-location/USGS-", .data$site_no,
+      "/#dataTypeId=continuous-00060-0&period=P7D&showFieldMeasurements=true"
+    ),
+    usgs_hydrograph_url = .data$usgs_7day_flow_plot_url,
+    usgs_rating_stac_url = paste0(
+      "https://api.waterdata.usgs.gov/stac-files/ratings/USGS.", .data$site_no, ".exsa.rdb"
+    ),
+    usgs_rating_depot_url = paste0(
+      "https://waterdata.usgs.gov/nwisweb/get_ratings?file_type=exsa&site_no=", .data$site_no
     ),
     cnrfc_obs_url = dplyr::if_else(
       .data$has_nwsli,
@@ -873,7 +880,8 @@ summary <- list(
   notes = c(
     "Latest discharge and stage values are from USGS Water Data API latest-continuous values where available.",
     "USGS Water Data API daily values are used only for compact recent-history context; daily chunks can fall back to direct OGC API calls if dataRetrieval progress UI fails.",
-    "CNRFC/HADS/APRFC links are included only where the optional NWSLI crosswalk provides an ID."
+    "CNRFC/HADS/APRFC links are included only where the optional NWSLI crosswalk provides an ID.",
+    "USGS rating-table links are generated from official USGS rating-file URL templates and may be unavailable for sites without traditional stage-discharge ratings."
   )
 )
 
