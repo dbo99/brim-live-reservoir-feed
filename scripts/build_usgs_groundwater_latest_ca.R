@@ -35,7 +35,7 @@
 # ---- 1. Packages ------------------------------------------------------------
 
 required_pkgs <- c(
-  "dataRetrieval", "dplyr", "readr", "lubridate", "jsonlite", "tibble", "purrr", "curl"
+  "dataRetrieval", "dplyr", "readr", "lubridate", "jsonlite", "tibble", "curl"
 )
 
 missing_pkgs <- required_pkgs[!vapply(required_pkgs, requireNamespace, logical(1), quietly = TRUE)]
@@ -74,7 +74,6 @@ suppressPackageStartupMessages({
   library(lubridate)
   library(jsonlite)
   library(tibble)
-  library(purrr)
   library(curl)
 })
 
@@ -710,7 +709,7 @@ message("USGS groundwater index-fallback feature count: ", index_fallback_count)
 
 # ---- 7. Write GeoJSON and summary ------------------------------------------
 
-features <- purrr::map(seq_len(nrow(latest_tbl)), function(i) pt_make_feature(latest_tbl[i, ]))
+features <- lapply(seq_len(nrow(latest_tbl)), function(i) pt_make_feature(latest_tbl[i, ]))
 
 geojson <- list(
   type = "FeatureCollection",
