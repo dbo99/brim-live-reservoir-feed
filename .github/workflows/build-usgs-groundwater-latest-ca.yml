@@ -41,7 +41,7 @@ jobs:
       - name: Install R package dependencies
         uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          cache-version: usgs-groundwater-v2-slim
+          cache-version: usgs-groundwater-v3-2yr
           packages: |
             any::dataRetrieval
             any::dplyr
@@ -54,7 +54,7 @@ jobs:
       - name: Build latest USGS CA groundwater GeoJSON
         shell: Rscript {0}
         env:
-          USGS_GW_FIELD_MEASUREMENTS_LOOKBACK_DAYS: "450"
+          USGS_GW_FIELD_MEASUREMENTS_LOOKBACK_DAYS: "800"
           USGS_GW_MIN_API_SITES_TO_PUBLISH: "300"
           USGS_GW_MIN_FEATURES_TO_PUBLISH: "300"
           USGS_GW_ALLOW_INDEX_FALLBACK: "true"
