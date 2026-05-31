@@ -111,10 +111,10 @@ gw_parameter_code <- Sys.getenv(
 
 field_measurements_lookback_days <- suppressWarnings(as.integer(Sys.getenv(
   "USGS_GW_FIELD_MEASUREMENTS_LOOKBACK_DAYS",
-  unset = "450"
+  unset = "800"
 )))
 if (is.na(field_measurements_lookback_days) || field_measurements_lookback_days < 30) {
-  field_measurements_lookback_days <- 450L
+  field_measurements_lookback_days <- 800L
 }
 
 chunk_size <- suppressWarnings(as.integer(Sys.getenv(
@@ -710,6 +710,7 @@ latest_tbl <- station_index |>
       is.na(.data$latest_wl_ft_bgs) ~ "no_recent_groundwater_level",
       !is.na(.data$latest_age_days) & .data$latest_age_days <= 90 ~ "latest_groundwater_level_90d",
       !is.na(.data$latest_age_days) & .data$latest_age_days <= 365 ~ "latest_groundwater_level_1y",
+      !is.na(.data$latest_age_days) & .data$latest_age_days <= 365 * 2 ~ "latest_groundwater_level_2y",
       !is.na(.data$latest_age_days) & .data$latest_age_days <= field_measurements_lookback_days ~ "latest_groundwater_level_query_window",
       TRUE ~ "stale_or_index_fallback_groundwater_level"
     ),
@@ -802,6 +803,7 @@ summary <- list(
   field_measurements_lookback_days = field_measurements_lookback_days,
   latest_90d_count = sum(!is.na(latest_tbl$latest_age_days) & latest_tbl$latest_age_days <= 90, na.rm = TRUE),
   latest_1y_count = sum(!is.na(latest_tbl$latest_age_days) & latest_tbl$latest_age_days <= 365, na.rm = TRUE),
+  latest_2y_count = sum(!is.na(latest_tbl$latest_age_days) & latest_tbl$latest_age_days <= 365 * 2, na.rm = TRUE),
   well_depth_count = sum(!is.na(latest_tbl$well_depth_ft), na.rm = TRUE),
   hole_depth_count = sum(!is.na(latest_tbl$hole_depth_ft), na.rm = TRUE),
   screen_interval_count = sum(latest_tbl$has_screen_interval, na.rm = TRUE),
@@ -816,7 +818,7 @@ summary <- list(
     "Latest groundwater levels are from USGS Water Data API field-measurements parameter 72019 where available.",
     "The BRIM input index provides stable site locations and well construction/aquifer fields.",
     "Index fallback is used only for sites without an API result in the query window when enabled; fallback rows are flagged with has_api_latest_wl = false.",
-    "Screen/perforation interval fields are preserved if available in the input, but the current RF027a candidate export found no populated screen interval fields.",
+    "Screen/perforation interval fields are preserved if available in the input, but the current public USGS API/index fields may not provide populated screen interval fields.",
     "USGS groundwater field measurements are low-frequency and may be provisional; interpret values with well construction, datum, aquifer/screen interval, and measurement history.",
     "If RF029 history summary CSV is present, compact water-year history and percentile fields are joined into the hosted GeoJSON for popup/mini-plot use."
   )
